@@ -7,13 +7,30 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/million-in/clerm/internal/clermcfg"
+	"github.com/million-in/clerm/internal/netutil"
 	"github.com/million-in/clerm/internal/platform"
 )
 
+const maxConfigPayloadBytes int64 = 8 << 20
+
+type URLPolicy func(context.Context, *url.URL) error
+
+type LoadConfigURLOptions struct {
+	HTTPClient      *http.Client
+	URLPolicy       URLPolicy
+	MaxPayloadBytes int64
+}
+
 func LoadConfigURL(ctx context.Context, rawURL string, httpClient *http.Client) (*Service, error) {
+	return LoadConfigURLWithOptions(ctx, rawURL, LoadConfigURLOptions{HTTPClient: httpClient})
+}
+
+func LoadConfigURLWithOptions(ctx context.Context, rawURL string, options LoadConfigURLOptions) (*Service, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	trimmed := strings.TrimSpace(rawURL)
 	if trimmed == "" {
 		return nil, platform.New(platform.CodeInvalidArgument, "schema URL is required")
@@ -25,6 +42,15 @@ func LoadConfigURL(ctx context.Context, rawURL string, httpClient *http.Client) 
 	if parsed.Scheme == "" || parsed.Host == "" {
 		return nil, platform.New(platform.CodeInvalidArgument, "schema URL must include scheme and host")
 	}
+	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
+		return nil, platform.New(platform.CodeInvalidArgument, "schema URL must use http or https")
+	}
+	if options.URLPolicy != nil {
+		if err := options.URLPolicy(ctx, parsed); err != nil {
+			return nil, err
+		}
+	}
+	httpClient := options.HTTPClient
 	if httpClient == nil {
 		httpClient = defaultHTTPClient()
 	}
@@ -49,9 +75,9 @@ func LoadConfigURL(ctx context.Context, rawURL string, httpClient *http.Client) 
 		}
 		return nil, platform.New(platform.CodeIO, message)
 	}
-	payload, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+	payload, err := readConfigPayload(response, options.MaxPayloadBytes)
 	if err != nil {
-		return nil, platform.Wrap(platform.CodeIO, err, "read schema config URL payload")
+		return nil, err
 	}
 	doc, err := clermcfg.Decode(payload)
 	if err != nil {
@@ -61,20 +87,70 @@ func LoadConfigURL(ctx context.Context, rawURL string, httpClient *http.Client) 
 }
 
 func defaultHTTPClient() *http.Client {
-	return &http.Client{
-		Timeout: 15 * time.Second,
-		Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
-			DialContext: (&net.Dialer{
-				Timeout:   5 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          100,
-			MaxIdleConnsPerHost:   20,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   5 * time.Second,
-			ExpectContinueTimeout: time.Second,
-		},
+	return netutil.NewDefaultHTTPClient(netutil.HTTPClientOptions{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+	})
+}
+
+func readConfigPayload(response *http.Response, maxPayloadBytes int64) ([]byte, error) {
+	if maxPayloadBytes <= 0 {
+		maxPayloadBytes = maxConfigPayloadBytes
 	}
+	if response.ContentLength > maxPayloadBytes {
+		return nil, platform.New(platform.CodeValidation, "schema config URL payload exceeds configured size limit")
+	}
+	payload, err := io.ReadAll(io.LimitReader(response.Body, maxPayloadBytes+1))
+	if err != nil {
+		return nil, platform.Wrap(platform.CodeIO, err, "read schema config URL payload")
+	}
+	if int64(len(payload)) > maxPayloadBytes {
+		return nil, platform.New(platform.CodeValidation, "schema config URL payload exceeds configured size limit")
+	}
+	return payload, nil
+}
+
+func DenyPrivateHostPolicy(ctx context.Context, rawURL *url.URL) error {
+	host := strings.ToLower(strings.TrimSpace(rawURL.Hostname()))
+	switch {
+	case host == "":
+		return platform.New(platform.CodeInvalidArgument, "schema URL host is required")
+	case host == "localhost", strings.HasSuffix(host, ".localhost"):
+		return platform.New(platform.CodeInvalidArgument, "schema URL host is not allowed")
+	}
+	ip := net.ParseIP(host)
+	if ip != nil {
+		if isBlockedIP(ip) {
+			return platform.New(platform.CodeInvalidArgument, "schema URL host is not allowed")
+		}
+		return nil
+	}
+	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return platform.Wrap(platform.CodeIO, err, "resolve schema URL host")
+	}
+	if len(addresses) == 0 {
+		return platform.New(platform.CodeIO, "schema URL host could not be resolved")
+	}
+	for _, address := range addresses {
+		if isBlockedIP(address.IP) {
+			return platform.New(platform.CodeInvalidArgument, "schema URL host is not allowed")
+		}
+	}
+	return nil
+}
+
+func isBlockedIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	return ip.IsGlobalUnicast() && inCIDR(ip, "100.64.0.0/10")
+}
+
+func inCIDR(ip net.IP, cidr string) bool {
+	_, network, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return false
+	}
+	return network.Contains(ip)
 }

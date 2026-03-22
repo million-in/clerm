@@ -5,12 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
+	"github.com/million-in/clerm/internal/netutil"
 	"github.com/million-in/clerm/platform"
 )
 
@@ -249,20 +248,8 @@ func trimCodePrefix(message string) string {
 }
 
 func defaultHTTPClient() *http.Client {
-	return &http.Client{
-		Timeout: 15 * time.Second,
-		Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
-			DialContext: (&net.Dialer{
-				Timeout:   5 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          128,
-			MaxIdleConnsPerHost:   128,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   5 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-		},
-	}
+	return netutil.NewDefaultHTTPClient(netutil.HTTPClientOptions{
+		MaxIdleConns:        128,
+		MaxIdleConnsPerHost: 128,
+	})
 }

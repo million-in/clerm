@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/million-in/clerm/registryrpc"
 )
@@ -85,7 +87,15 @@ relations @general.mandene
 			t.Fatalf("unexpected registry URL: %s", baseURL)
 		}
 		return mockRegistryClient{
-			register: func(_ context.Context, input registryrpc.RegisterInput) (*registryrpc.RegisterOutput, error) {
+			register: func(ctx context.Context, input registryrpc.RegisterInput) (*registryrpc.RegisterOutput, error) {
+				deadline, ok := ctx.Deadline()
+				if !ok {
+					t.Fatal("expected timeout context")
+				}
+				until := time.Until(deadline)
+				if until <= 0 || until > 31*time.Second {
+					t.Fatalf("unexpected timeout window: %s", until)
+				}
 				if input.OwnerID != "seller-1" {
 					t.Fatalf("unexpected owner id: %s", input.OwnerID)
 				}
@@ -280,11 +290,28 @@ func TestRunInvokeWritesRawResponse(t *testing.T) {
 	if data, err := os.ReadFile(bodyPath); err != nil || string(data) != `{"ok":true}` {
 		t.Fatalf("unexpected invoke body file: %q err=%v", string(data), err)
 	}
+	info, err := os.Stat(bodyPath)
+	if err != nil {
+		t.Fatalf("Stat(body) error = %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("unexpected body file mode: %o", info.Mode().Perm())
+	}
 	var output map[string]any
 	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v output=%s", err, stdout.String())
 	}
 	if output["status_code"] != float64(202) {
 		t.Fatalf("unexpected invoke output: %#v", output)
+	}
+}
+
+func TestBuildInvokeViewRejectsLargeInlineBody(t *testing.T) {
+	_, err := buildInvokeView(&registryrpc.InvokeOutput{
+		StatusCode: http.StatusOK,
+		Body:       []byte("12345"),
+	}, "", 4)
+	if err == nil || !strings.Contains(err.Error(), "exceeds inline limit") {
+		t.Fatalf("expected inline limit error, got %v", err)
 	}
 }

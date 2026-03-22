@@ -92,7 +92,9 @@ func loadService(schemaPath string, schemaURL string, publicKeyPath string, keyI
 	case strings.TrimSpace(schemaPath) != "":
 		service, err = resolver.LoadConfig(strings.TrimSpace(schemaPath))
 	case strings.TrimSpace(schemaURL) != "":
-		service, err = resolver.LoadConfigURL(context.Background(), strings.TrimSpace(schemaURL), nil)
+		service, err = resolver.LoadConfigURLWithOptions(context.Background(), strings.TrimSpace(schemaURL), resolver.LoadConfigURLOptions{
+			URLPolicy: resolver.DenyPrivateHostPolicy,
+		})
 	default:
 		return nil, platform.New(platform.CodeInvalidArgument, "schema source is required")
 	}

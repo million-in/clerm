@@ -1,24 +1,26 @@
-GOCACHE_DIR := $(CURDIR)/.cache/go-build
-GO_BENCH_ENV := mkdir -p $(GOCACHE_DIR) .bench && env GOCACHE=$(GOCACHE_DIR)
+GOCACHE ?= $(CURDIR)/.cache/go-build
+GOMODCACHE ?= $(CURDIR)/.cache/go-mod
+GO_ENV := mkdir -p $(GOCACHE) $(GOMODCACHE) && env GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE)
+GO_BENCH_ENV := mkdir -p $(GOCACHE) $(GOMODCACHE) .bench && env GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE)
 
 .PHONY: build build-resolver test-unit test-integration test-e2e test bench bench-resolver bench-split bench-escape bench-profile clean
 
 build:
 	mkdir -p bin
-	go build -o bin/clerm ./cmd/clerm
+	$(GO_ENV) go build -o bin/clerm ./cmd/clerm
 
 build-resolver:
 	mkdir -p bin
-	go build -o bin/clerm-resolver ./cmd/clerm-resolver
+	$(GO_ENV) go build -o bin/clerm-resolver ./cmd/clerm-resolver
 
 test-unit:
-	go test ./internal/schema ./internal/clermcfg ./internal/clermreq ./internal/clermresp -count=1
+	$(GO_ENV) go test ./internal/schema ./internal/clermcfg ./internal/clermreq ./internal/clermresp -count=1
 
 test-integration:
-	go test ./internal/resolver ./internal/app/resolvercli -count=1
+	$(GO_ENV) go test ./internal/resolver ./internal/app/resolvercli -count=1
 
 test-e2e:
-	go test ./e2e -count=1
+	$(GO_ENV) go test ./e2e -count=1
 
 bench:
 	$(GO_BENCH_ENV) go test ./internal/clermcfg ./internal/clermreq ./internal/resolver -bench . -benchmem -run '^$$'
@@ -38,7 +40,7 @@ bench-profile:
 	$(GO_BENCH_ENV) go test ./internal/clermreq -bench . -benchmem -run '^$$' -count=1 -cpuprofile .bench/clermreq.cpu.pprof -memprofile .bench/clermreq.mem.pprof
 
 test:
-	go test ./... -count=1
+	$(GO_ENV) go test ./... -count=1
 
 clean:
 	rm -rf bin dist .bench .cache schemas *.clerm *.clermcfg *.token *.tokens *.ed25519 *.ed25519.pub *.test *.out

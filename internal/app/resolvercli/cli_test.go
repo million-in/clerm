@@ -67,6 +67,13 @@ relations @general.mandene
 	}
 }
 
+func TestLoadServiceRejectsPrivateSchemaURL(t *testing.T) {
+	_, err := loadService("", "http://127.0.0.1/schema.clermcfg", "", "registry")
+	if err == nil || !strings.Contains(err.Error(), "host is not allowed") {
+		t.Fatalf("expected private schema URL rejection, got %v", err)
+	}
+}
+
 func TestDaemonListenerUnixSocket(t *testing.T) {
 	socketPath := filepath.Join("/tmp", fmt.Sprintf("clerm-resolver-%d.sock", time.Now().UnixNano()))
 	defer os.Remove(socketPath)

@@ -114,6 +114,37 @@ func TestInvokeReturnsRegistryValidationErrors(t *testing.T) {
 	}
 }
 
+func TestInvokePassesThroughUpstreamErrorResponses(t *testing.T) {
+	t.Parallel()
+
+	client, err := registryrpc.New("http://registry.local", &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadGateway,
+			Header: http.Header{
+				"Clerm-Target": []string{"registry.invoke"},
+			},
+			Body: io.NopCloser(strings.NewReader(`{"ok":false}`)),
+		}, nil
+	})})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	output, err := client.Invoke(context.Background(), registryrpc.InvokeInput{
+		ProviderFingerprint: "schema-fp",
+		Payload:             []byte("request"),
+	})
+	if err != nil {
+		t.Fatalf("Invoke() error = %v", err)
+	}
+	if output.StatusCode != http.StatusBadGateway {
+		t.Fatalf("unexpected status code: %d", output.StatusCode)
+	}
+	if string(output.Body) != `{"ok":false}` {
+		t.Fatalf("unexpected body: %s", string(output.Body))
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
