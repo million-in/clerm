@@ -23,6 +23,7 @@ clerm
 /clerm_registry/
 /descriptions.md
 /PROJECT.MD 
+/maintainer_reviews/
 *.refresh
 other_servers/rust/target/
 other_servers/python/__pycache__/

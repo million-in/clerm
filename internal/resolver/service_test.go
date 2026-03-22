@@ -240,6 +240,29 @@ func TestServeHTTPEncodesPrebuiltSuccessResponse(t *testing.T) {
 	}
 }
 
+func TestInvocationArgumentsMapReturnsIndependentCopies(t *testing.T) {
+	doc := mustDocument(t)
+	service := resolver.New(doc)
+	payload := mustEncodedRequest(t, doc, "@global.healthcare.search_providers.v1", `{"specialty":"cardiology","latitude":40.7,"longitude":-73.9}`)
+
+	invocation, err := service.ResolveInvocationWithTarget(payload, "internal.search")
+	if err != nil {
+		t.Fatalf("ResolveInvocationWithTarget() error = %v", err)
+	}
+	first, err := invocation.ArgumentsMap()
+	if err != nil {
+		t.Fatalf("ArgumentsMap(first) error = %v", err)
+	}
+	second, err := invocation.ArgumentsMap()
+	if err != nil {
+		t.Fatalf("ArgumentsMap(second) error = %v", err)
+	}
+	first["specialty"] = "mutated"
+	if second["specialty"] != "cardiology" {
+		t.Fatalf("expected cached arguments to remain immutable, got %#v", second)
+	}
+}
+
 func TestServeHTTPEncodesHandlerErrorResponse(t *testing.T) {
 	doc := mustDocument(t)
 	service := resolver.New(doc)

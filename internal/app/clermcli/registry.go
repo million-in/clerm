@@ -18,11 +18,17 @@ import (
 
 const defaultRegistryBaseURL = "http://127.0.0.1:8090"
 
+const (
+	defaultRegistryRequestTimeout = 30 * time.Second
+	defaultInvokeInlineLimit      = 1 << 20
+)
+
 type invokeResultView struct {
 	StatusCode    int                 `json:"status_code"`
 	Headers       map[string][]string `json:"headers,omitempty"`
 	Target        string              `json:"target,omitempty"`
 	CommandMethod string              `json:"command_method,omitempty"`
+	BodyBytes     int                 `json:"body_bytes,omitempty"`
 	BodyFile      string              `json:"body_file,omitempty"`
 	BodyText      string              `json:"body_text,omitempty"`
 	BodyBase64    string              `json:"body_base64,omitempty"`
@@ -58,6 +64,7 @@ func runRegister(streams Streams, args []string) error {
 	fs := flag.NewFlagSet("register", flag.ContinueOnError)
 	fs.SetOutput(streams.Stderr)
 	registryURL := fs.String("registry", defaultRegistryURL(), "registry base URL")
+	timeout := registryTimeoutFlag(fs)
 	in := fs.String("in", "", "path to .clermfile or .clermcfg")
 	ownerID := fs.String("owner", "", "schema owner identifier")
 	status := fs.String("status", "active", "schema status")
@@ -75,7 +82,9 @@ func runRegister(streams Streams, args []string) error {
 	if err != nil {
 		return err
 	}
-	output, err := client.Register(context.Background(), registryrpc.RegisterInput{
+	ctx, cancel := newRegistryContext(*timeout)
+	defer cancel()
+	output, err := client.Register(ctx, registryrpc.RegisterInput{
 		OwnerID: strings.TrimSpace(*ownerID),
 		Status:  strings.TrimSpace(*status),
 		Payload: payload,
@@ -98,6 +107,7 @@ func runSearchCommand(streams Streams, target string, args []string) error {
 	fs := flag.NewFlagSet(target, flag.ContinueOnError)
 	fs.SetOutput(streams.Stderr)
 	registryURL := fs.String("registry", defaultRegistryURL(), "registry base URL")
+	timeout := registryTimeoutFlag(fs)
 	consumerID := fs.String("consumer", "", "consumer identifier")
 	query := fs.String("query", "", "search text")
 	relations := fs.String("relations", "", "comma-separated relation filters")
@@ -112,6 +122,8 @@ func runSearchCommand(streams Streams, target string, args []string) error {
 	if err != nil {
 		return err
 	}
+	ctx, cancel := newRegistryContext(*timeout)
+	defer cancel()
 	input := registryrpc.SearchInput{
 		ConsumerID: strings.TrimSpace(*consumerID),
 		Query:      strings.TrimSpace(*query),
@@ -124,9 +136,9 @@ func runSearchCommand(streams Streams, target string, args []string) error {
 	var output *registryrpc.SearchOutput
 	switch target {
 	case "discover":
-		output, err = client.Discover(context.Background(), input)
+		output, err = client.Discover(ctx, input)
 	default:
-		output, err = client.Search(context.Background(), input)
+		output, err = client.Search(ctx, input)
 	}
 	if err != nil {
 		return err
@@ -152,6 +164,7 @@ func runRelationshipEstablish(streams Streams, args []string) error {
 	fs := flag.NewFlagSet("relationship establish", flag.ContinueOnError)
 	fs.SetOutput(streams.Stderr)
 	registryURL := fs.String("registry", defaultRegistryURL(), "registry base URL")
+	timeout := registryTimeoutFlag(fs)
 	consumerID := fs.String("consumer", "", "consumer identifier")
 	schemaPath := fs.String("schema", "", "path to .clermfile or .clermcfg")
 	fingerprint := fs.String("fingerprint", "", "registered schema fingerprint")
@@ -171,7 +184,9 @@ func runRelationshipEstablish(streams Streams, args []string) error {
 	if err != nil {
 		return err
 	}
-	output, err := client.EstablishRelationship(context.Background(), registryrpc.RelationshipInput{
+	ctx, cancel := newRegistryContext(*timeout)
+	defer cancel()
+	output, err := client.EstablishRelationship(ctx, registryrpc.RelationshipInput{
 		ConsumerID:          strings.TrimSpace(*consumerID),
 		ProviderFingerprint: providerFingerprint,
 		Relation:            strings.TrimSpace(*relation),
@@ -187,6 +202,7 @@ func runRelationshipStatus(streams Streams, args []string) error {
 	fs := flag.NewFlagSet("relationship status", flag.ContinueOnError)
 	fs.SetOutput(streams.Stderr)
 	registryURL := fs.String("registry", defaultRegistryURL(), "registry base URL")
+	timeout := registryTimeoutFlag(fs)
 	consumerID := fs.String("consumer", "", "consumer identifier")
 	schemaPath := fs.String("schema", "", "path to .clermfile or .clermcfg")
 	fingerprint := fs.String("fingerprint", "", "registered schema fingerprint")
@@ -204,7 +220,9 @@ func runRelationshipStatus(streams Streams, args []string) error {
 	if err != nil {
 		return err
 	}
-	output, err := client.RelationshipStatus(context.Background(), registryrpc.RelationshipStatusInput{
+	ctx, cancel := newRegistryContext(*timeout)
+	defer cancel()
+	output, err := client.RelationshipStatus(ctx, registryrpc.RelationshipStatusInput{
 		ConsumerID:          strings.TrimSpace(*consumerID),
 		ProviderFingerprint: providerFingerprint,
 	})
@@ -218,6 +236,7 @@ func runTokenIssueRPC(streams Streams, args []string) error {
 	fs := flag.NewFlagSet("token issue", flag.ContinueOnError)
 	fs.SetOutput(streams.Stderr)
 	registryURL := fs.String("registry", defaultRegistryURL(), "registry base URL")
+	timeout := registryTimeoutFlag(fs)
 	consumerID := fs.String("consumer", "", "consumer identifier")
 	schemaPath := fs.String("schema", "", "path to .clermfile or .clermcfg")
 	fingerprint := fs.String("fingerprint", "", "registered schema fingerprint")
@@ -243,7 +262,9 @@ func runTokenIssueRPC(streams Streams, args []string) error {
 	if err != nil {
 		return err
 	}
-	output, err := client.IssueToken(context.Background(), registryrpc.IssueTokenInput{
+	ctx, cancel := newRegistryContext(*timeout)
+	defer cancel()
+	output, err := client.IssueToken(ctx, registryrpc.IssueTokenInput{
 		ConsumerID:          strings.TrimSpace(*consumerID),
 		ProviderFingerprint: providerFingerprint,
 		Method:              strings.TrimSpace(*methodRef),
@@ -267,6 +288,7 @@ func runTokenRefresh(streams Streams, args []string) error {
 	fs := flag.NewFlagSet("token refresh", flag.ContinueOnError)
 	fs.SetOutput(streams.Stderr)
 	registryURL := fs.String("registry", defaultRegistryURL(), "registry base URL")
+	timeout := registryTimeoutFlag(fs)
 	refreshToken := fs.String("refresh-token", "", "refresh token value")
 	targets := fs.String("targets", "", "comma-separated exact targets")
 	invokeTTL := fs.Duration("invoke-ttl", 30*time.Minute, "invoke token lifetime")
@@ -283,7 +305,9 @@ func runTokenRefresh(streams Streams, args []string) error {
 	if err != nil {
 		return err
 	}
-	output, err := client.RefreshToken(context.Background(), registryrpc.RefreshTokenInput{
+	ctx, cancel := newRegistryContext(*timeout)
+	defer cancel()
+	output, err := client.RefreshToken(ctx, registryrpc.RefreshTokenInput{
 		RefreshToken:      strings.TrimSpace(*refreshToken),
 		Targets:           splitCSV(*targets),
 		InvokeTTLSeconds:  durationSeconds(*invokeTTL),
@@ -303,10 +327,12 @@ func runInvoke(streams Streams, args []string) error {
 	fs := flag.NewFlagSet("invoke", flag.ContinueOnError)
 	fs.SetOutput(streams.Stderr)
 	registryURL := fs.String("registry", defaultRegistryURL(), "registry base URL")
+	timeout := registryTimeoutFlag(fs)
 	requestPath := fs.String("request", "", "path to .clerm request payload")
 	schemaPath := fs.String("schema", "", "path to .clermfile or .clermcfg")
 	fingerprint := fs.String("fingerprint", "", "registered schema fingerprint")
 	out := fs.String("out", "", "optional path to write raw upstream body")
+	inlineLimit := fs.Int("inline-limit", defaultInvokeInlineLimit, "maximum body bytes to inline into JSON output when -out is omitted")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -325,14 +351,16 @@ func runInvoke(streams Streams, args []string) error {
 	if err != nil {
 		return err
 	}
-	output, err := client.Invoke(context.Background(), registryrpc.InvokeInput{
+	ctx, cancel := newRegistryContext(*timeout)
+	defer cancel()
+	output, err := client.Invoke(ctx, registryrpc.InvokeInput{
 		ProviderFingerprint: providerFingerprint,
 		Payload:             payload,
 	})
 	if err != nil {
 		return err
 	}
-	view, err := buildInvokeView(output, *out)
+	view, err := buildInvokeView(output, *out, *inlineLimit)
 	if err != nil {
 		return err
 	}
@@ -349,6 +377,17 @@ func defaultRegistryURL() string {
 		return defaultRegistryBaseURL
 	}
 	return value
+}
+
+func registryTimeoutFlag(fs *flag.FlagSet) *time.Duration {
+	return fs.Duration("timeout", defaultRegistryRequestTimeout, "per-request registry timeout (0 disables)")
+}
+
+func newRegistryContext(timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return context.WithCancel(context.Background())
+	}
+	return context.WithTimeout(context.Background(), timeout)
 }
 
 func resolveProviderFingerprint(schemaPath string, fingerprint string) (string, error) {
@@ -416,19 +455,23 @@ func writeTokenOutputs(output *registryrpc.IssueTokenOutput, capPath string, ref
 	return view, nil
 }
 
-func buildInvokeView(output *registryrpc.InvokeOutput, outPath string) (*invokeResultView, error) {
+func buildInvokeView(output *registryrpc.InvokeOutput, outPath string, inlineLimit int) (*invokeResultView, error) {
 	view := &invokeResultView{
 		StatusCode:    output.StatusCode,
 		Headers:       output.Headers,
 		Target:        output.Target,
 		CommandMethod: output.CommandMethod,
+		BodyBytes:     len(output.Body),
 	}
 	if strings.TrimSpace(outPath) != "" {
-		if err := os.WriteFile(outPath, output.Body, 0o644); err != nil {
+		if err := os.WriteFile(outPath, output.Body, 0o600); err != nil {
 			return nil, platform.Wrap(platform.CodeIO, err, "write invoke response body")
 		}
 		view.BodyFile = outPath
 		return view, nil
+	}
+	if inlineLimit > 0 && len(output.Body) > inlineLimit {
+		return nil, platform.New(platform.CodeValidation, "invoke response body exceeds inline limit; use -out or raise -inline-limit")
 	}
 	if utf8.Valid(output.Body) {
 		view.BodyText = string(output.Body)

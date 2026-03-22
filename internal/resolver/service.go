@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -45,6 +46,8 @@ type Invocation struct {
 	Capability        *capability.Token
 	rawArguments      []clermreq.Argument
 	decodedArguments  map[string]any
+	decodeOnce        sync.Once
+	decodeErr         error
 }
 
 type Result struct {
@@ -289,19 +292,22 @@ func (i *Invocation) ArgumentsMap() (map[string]any, error) {
 	if i == nil {
 		return nil, platform.New(platform.CodeInvalidArgument, "resolver invocation is required")
 	}
-	if i.decodedArguments != nil {
-		return i.decodedArguments, nil
-	}
-	decoded := make(map[string]any, len(i.rawArguments))
-	for _, arg := range i.rawArguments {
-		value, err := clermwire.DecodeValue(arg.Type, arg.Raw)
-		if err != nil {
-			return nil, err
+	i.decodeOnce.Do(func() {
+		decoded := make(map[string]any, len(i.rawArguments))
+		for _, arg := range i.rawArguments {
+			value, err := clermwire.DecodeValue(arg.Type, arg.Raw)
+			if err != nil {
+				i.decodeErr = err
+				return
+			}
+			decoded[arg.Name] = value
 		}
-		decoded[arg.Name] = value
+		i.decodedArguments = decoded
+	})
+	if i.decodeErr != nil {
+		return nil, i.decodeErr
 	}
-	i.decodedArguments = decoded
-	return decoded, nil
+	return cloneArguments(i.decodedArguments), nil
 }
 
 func (i *Invocation) Argument(name string) (any, bool, error) {
@@ -328,6 +334,13 @@ func (i *Invocation) RawArgument(name string) (json.RawMessage, schema.ArgType, 
 
 func (s *Service) Handler() http.Handler {
 	return s
+}
+
+func (s *Service) nowTime() time.Time {
+	if s != nil && s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 func (s *Service) Middleware(next http.Handler) http.Handler {
@@ -410,10 +423,7 @@ func (s *Service) resolveCapability(request *clermreq.Request, method schema.Met
 	if err := s.keyring.Verify(token); err != nil {
 		return nil, err
 	}
-	now := time.Now()
-	if s.now != nil {
-		now = s.now()
-	}
+	now := s.nowTime()
 	if err := capability.VerifyTime(token, now, s.skew); err != nil {
 		return nil, err
 	}
@@ -454,6 +464,17 @@ func errorMessage(err error) string {
 		return strings.TrimSpace(coded.Message)
 	}
 	return strings.TrimSpace(err.Error())
+}
+
+func cloneArguments(values map[string]any) map[string]any {
+	if len(values) == 0 {
+		return map[string]any{}
+	}
+	cloned := make(map[string]any, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func httpStatus(err error) int {
