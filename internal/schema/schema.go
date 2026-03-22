@@ -25,8 +25,12 @@ func ParseExecutionMode(raw string) (ExecutionMode, error) {
 	case "async.pool":
 		return ExecutionAsyncPool, nil
 	default:
-		return ExecutionUnknown, platform.New(platform.CodeValidation, "unknown execution mode")
+		return ExecutionUnknown, platform.New(platform.CodeValidation, fmt.Sprintf("unknown execution mode %q; available modes: %s", strings.TrimSpace(raw), strings.Join(AvailableExecutionModes(), ", ")))
 	}
+}
+
+func AvailableExecutionModes() []string {
+	return []string{"sync", "async.pool"}
 }
 
 func (e ExecutionMode) String() string {
@@ -74,8 +78,12 @@ func ParseArgType(raw string) (ArgType, error) {
 	case "BOOL", "BOOLEAN":
 		return ArgBool, nil
 	default:
-		return ArgUnknown, platform.New(platform.CodeValidation, "unknown argument type")
+		return ArgUnknown, platform.New(platform.CodeValidation, fmt.Sprintf("unknown argument type %q; available types: %s", strings.TrimSpace(raw), strings.Join(AvailableArgTypes(), ", ")))
 	}
+}
+
+func AvailableArgTypes() []string {
+	return []string{"STRING", "DECIMAL", "UUID", "ARRAY", "TIMESTAMP", "INT", "BOOL"}
 }
 
 func (a ArgType) String() string {
@@ -121,8 +129,12 @@ func ParsePayloadFormat(raw string) (PayloadFormat, error) {
 	case "yaml":
 		return FormatYAML, nil
 	default:
-		return FormatUnknown, platform.New(platform.CodeValidation, "unknown payload format")
+		return FormatUnknown, platform.New(platform.CodeValidation, fmt.Sprintf("unknown payload format %q; available formats: %s", strings.TrimSpace(raw), strings.Join(AvailablePayloadFormats(), ", ")))
 	}
+}
+
+func AvailablePayloadFormats() []string {
+	return []string{"json", "xml", "yaml"}
 }
 
 func (f PayloadFormat) String() string {
@@ -261,7 +273,15 @@ func (d *Document) Validate() error {
 			return platform.Wrap(platform.CodeValidation, err, "invalid method declaration")
 		}
 		if !containsService(d.Services, method.Reference.Raw) {
-			return platform.New(platform.CodeValidation, "method must be declared in schema avail before it is defined")
+			return platform.New(
+				platform.CodeValidation,
+				fmt.Sprintf(
+					"method %s must be declared in schema avail before it is defined; add %q under the schema section; declared services: %s",
+					method.Reference.Raw,
+					"service: "+method.Reference.Raw,
+					strings.Join(declaredServices(d.Services), ", "),
+				),
+			)
 		}
 		for j := 0; j < i; j++ {
 			if d.Methods[j].Reference.Raw == method.Reference.Raw {
@@ -483,6 +503,18 @@ func containsService(services []ServiceRef, raw string) bool {
 		}
 	}
 	return false
+}
+
+func declaredServices(services []ServiceRef) []string {
+	if len(services) == 0 {
+		return []string{"none"}
+	}
+	values := make([]string, 0, len(services))
+	for _, service := range services {
+		values = append(values, service.Raw)
+	}
+	sort.Strings(values)
+	return values
 }
 
 func containsRelation(relations []RelationRule, name string) bool {

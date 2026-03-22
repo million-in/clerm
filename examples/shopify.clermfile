@@ -1,0 +1,55 @@
+schema @general.avial.mandene
+  @metadata:
+    description: Shopify Clermfile schema
+    tags: shop, online, sell, discovery
+    category: internet
+  @route: https://api.shopify.com/clerm 
+  service: @global.shopify.search_merchants.v1
+  service: @global.shopify.search_products.v2
+  service: @verified.shopify.buy_products.v1
+  service: @verified.shopify.make_store.v1
+  service: @verified.shopify.check_balance.v3
+
+method @global.shopify.search_merchants.v1
+  @exec: async.pool
+  @args_input: 1
+    decl_args: search_query.STRING
+  @args_output: 2
+    decl_args: id.UUID, merchants.ARRAY
+    decl_format: Xml
+
+method @global.shopify.search_products.v2
+  @exec: async.pool
+  @args_input: 1
+    decl_args: search_query.STRING
+  @args_output: 2
+    decl_args: id.UUID, products.ARRAY
+    decl_format: Xml
+    
+method @verified.shopify.buy_products.v1
+  @exec: sync
+  @args_input: 3
+    decl_args: product_id.STRING, user_id.STRING, quantity.INT
+  @args_output: 2
+    decl_args: status.BOOL, checkout_id.STRING
+    decl_format: Xml
+
+method @verified.shopify.make_store.v1
+  @exec: sync
+  @args_input: 4
+    decl_args: store_name.STRING, user_id.STRING, products_quantity.INT, country.STRING 
+  @args_output: 2
+    decl_args: status.BOOL, store_id.STRING
+    decl_format: Xml
+
+method @verified.shopify.check_balance.v3
+  @exec: async.pool
+  @args_input: 2
+    decl_args: user_id.STRING, account_id.STRING
+  @args_output: 3
+    decl_args: stats.BOOL, balance.DECIMAL, account_id.STRING
+    decl_format: Xml
+
+relations @general.mandene
+  @global: any.protected
+  @verified: auth.required

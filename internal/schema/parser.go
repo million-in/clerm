@@ -2,6 +2,7 @@ package schema
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -22,19 +23,19 @@ func Parse(r io.Reader) (*Document, error) {
 		lineNo++
 		raw := scanner.Text()
 		if strings.ContainsRune(raw, '\t') {
-			return nil, parseError(lineNo, "tabs are not allowed; use two-space indentation")
+			return nil, parseErrorAt(lineNo, raw, strings.IndexByte(raw, '\t')+1, 1, "tabs are not allowed; use two-space indentation")
 		}
-		raw = stripComments(raw)
-		if strings.TrimSpace(raw) == "" {
+		clean := stripComments(raw)
+		if strings.TrimSpace(clean) == "" {
 			continue
 		}
-		indent := leadingSpaces(raw)
+		indent := leadingSpaces(clean)
 		if indent%2 != 0 {
-			return nil, parseError(lineNo, "indentation must be a multiple of 2 spaces")
+			return nil, parseErrorAt(lineNo, clean, indent+1, 1, "indentation must be a multiple of 2 spaces")
 		}
-		text := strings.TrimSpace(raw)
+		text := strings.TrimSpace(clean)
 		if strings.HasPrefix(text, "@routes.") {
-			return nil, parseError(lineNo, "@routes declarations are not allowed in public .clermfile schemas")
+			return nil, parseErrorAt(lineNo, text, 1, len("@routes"), "@routes declarations are not allowed in public .clermfile schemas")
 		}
 		switch indent {
 		case 0:
@@ -50,7 +51,7 @@ func Parse(r io.Reader) (*Document, error) {
 				return nil, err
 			}
 		default:
-			return nil, parseError(lineNo, "indentation depth is invalid for this grammar")
+			return nil, parseErrorAt(lineNo, clean, indent+1, 1, "indentation depth is invalid for this grammar")
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -73,22 +74,22 @@ func beginTopLevel(doc *Document, state *parserState, text string, lineNo int) e
 	switch {
 	case strings.HasPrefix(text, "schema "):
 		if doc.Name != "" {
-			return parseError(lineNo, "schema declaration can only appear once")
+			return parseErrorAt(lineNo, text, 1, len("schema"), "schema declaration can only appear once")
 		}
 		doc.Name = strings.TrimSpace(strings.TrimPrefix(text, "schema "))
 		if doc.Name == "" {
-			return parseError(lineNo, "schema declaration name is required")
+			return parseErrorAt(lineNo, text, len("schema ")+1, 1, "schema declaration name is required")
 		}
 		state.section = "schema"
 		state.currentMethod = nil
 		return nil
 	case strings.HasPrefix(text, "method "):
 		if doc.Name == "" {
-			return parseError(lineNo, "schema declaration must appear before methods")
+			return parseErrorAt(lineNo, text, 1, len("method"), "schema declaration must appear before methods")
 		}
 		ref, err := ParseServiceRef(strings.TrimSpace(strings.TrimPrefix(text, "method ")))
 		if err != nil {
-			return platform.Wrap(platform.CodeParse, err, lineMessage(lineNo, "invalid method declaration"))
+			return parseWrapAt(lineNo, text, len("method ")+1, len(strings.TrimSpace(strings.TrimPrefix(text, "method "))), "invalid method declaration", err)
 		}
 		doc.Methods = append(doc.Methods, Method{Reference: ref, InputCount: -1, OutputCount: -1})
 		state.section = "method"
@@ -96,102 +97,103 @@ func beginTopLevel(doc *Document, state *parserState, text string, lineNo int) e
 		return nil
 	case strings.HasPrefix(text, "relations "):
 		if doc.Name == "" {
-			return parseError(lineNo, "schema declaration must appear before relations")
+			return parseErrorAt(lineNo, text, 1, len("relations"), "schema declaration must appear before relations")
 		}
 		if doc.RelationsName != "" {
-			return parseError(lineNo, "relations declaration can only appear once")
+			return parseErrorAt(lineNo, text, 1, len("relations"), "relations declaration can only appear once")
 		}
 		doc.RelationsName = strings.TrimSpace(strings.TrimPrefix(text, "relations "))
 		if doc.RelationsName == "" {
-			return parseError(lineNo, "relations declaration name is required")
+			return parseErrorAt(lineNo, text, len("relations ")+1, 1, "relations declaration name is required")
 		}
 		state.section = "relations"
 		state.currentMethod = nil
 		return nil
 	default:
-		return parseError(lineNo, "unknown top-level declaration")
+		token := firstToken(text)
+		return parseErrorAt(lineNo, text, 1, spanWidth(token), "unknown top-level declaration; expected schema, method, or relations")
 	}
 }
 
 func parseLevelOne(doc *Document, state *parserState, text string, lineNo int) error {
 	switch state.section {
 	case "schema":
-		key, value, err := parseAssignment(text)
+		assignment, err := parseAssignment(text)
 		if err != nil {
-			return platform.Wrap(platform.CodeParse, err, lineMessage(lineNo, "invalid schema entry"))
+			return parseWrapAt(lineNo, text, 1, spanWidth(firstToken(text)), "invalid schema entry", err)
 		}
-		switch key {
+		switch assignment.Key {
 		case "@metadata":
-			if strings.TrimSpace(value) != "" {
-				return parseError(lineNo, "@metadata must not have an inline value")
+			if strings.TrimSpace(assignment.Value) != "" {
+				return parseErrorAt(lineNo, text, assignment.ValueColumn, assignment.ValueWidth, "@metadata must not have an inline value")
 			}
 			state.nestedSection = "metadata"
 			return nil
 		case "service":
-			service, err := ParseServiceRef(value)
+			service, err := ParseServiceRef(assignment.Value)
 			if err != nil {
-				return platform.Wrap(platform.CodeParse, err, lineMessage(lineNo, "invalid service declaration"))
+				return parseWrapAt(lineNo, text, assignment.ValueColumn, assignment.ValueWidth, "invalid service declaration", err)
 			}
 			doc.Services = append(doc.Services, service)
 			state.nestedSection = ""
 			return nil
 		case "@route", "@routes", "route":
 			if doc.Route != "" {
-				return parseError(lineNo, "schema can only declare one route")
+				return parseErrorAt(lineNo, text, assignment.KeyColumn, assignment.KeyWidth, "schema can only declare one route")
 			}
-			doc.Route = strings.TrimSpace(value)
+			doc.Route = strings.TrimSpace(assignment.Value)
 			if doc.Route == "" {
-				return parseError(lineNo, "route value is required")
+				return parseErrorAt(lineNo, text, assignment.ValueColumn, assignment.ValueWidth, "route value is required")
 			}
 			state.nestedSection = ""
 			return nil
 		default:
-			return parseError(lineNo, "schema section only accepts @metadata, service, and route declarations")
+			return parseErrorAt(lineNo, text, assignment.KeyColumn, assignment.KeyWidth, "schema section only accepts @metadata, service, and route declarations")
 		}
 	case "method":
 		if state.currentMethod == nil {
-			return parseError(lineNo, "method state is not initialized")
+			return parseErrorAt(lineNo, text, 1, spanWidth(firstToken(text)), "method state is not initialized")
 		}
-		key, value, err := parseAssignment(text)
+		assignment, err := parseAssignment(text)
 		if err != nil {
-			return platform.Wrap(platform.CodeParse, err, lineMessage(lineNo, "invalid method entry"))
+			return parseWrapAt(lineNo, text, 1, spanWidth(firstToken(text)), "invalid method entry", err)
 		}
-		switch key {
+		switch assignment.Key {
 		case "@exec":
-			state.currentMethod.Execution, err = ParseExecutionMode(value)
+			state.currentMethod.Execution, err = ParseExecutionMode(assignment.Value)
 			if err != nil {
-				return platform.Wrap(platform.CodeParse, err, lineMessage(lineNo, "invalid @exec value"))
+				return parseWrapAt(lineNo, text, assignment.ValueColumn, assignment.ValueWidth, "invalid @exec value", err)
 			}
 			state.nestedSection = ""
 			return nil
 		case "@args_input":
-			count, err := parseOptionalCount(value)
+			count, err := parseOptionalCount(assignment.Value)
 			if err != nil {
-				return platform.Wrap(platform.CodeParse, err, lineMessage(lineNo, "invalid @args_input value"))
+				return parseWrapAt(lineNo, text, assignment.ValueColumn, assignment.ValueWidth, "invalid @args_input value", err)
 			}
 			state.currentMethod.InputCount = count
 			state.nestedSection = "input"
 			return nil
 		case "@args_output":
-			count, err := parseOptionalCount(value)
+			count, err := parseOptionalCount(assignment.Value)
 			if err != nil {
-				return platform.Wrap(platform.CodeParse, err, lineMessage(lineNo, "invalid @args_output value"))
+				return parseWrapAt(lineNo, text, assignment.ValueColumn, assignment.ValueWidth, "invalid @args_output value", err)
 			}
 			state.currentMethod.OutputCount = count
 			state.nestedSection = "output"
 			return nil
 		default:
-			return parseError(lineNo, "unknown method declaration keyword")
+			return parseErrorAt(lineNo, text, assignment.KeyColumn, assignment.KeyWidth, "unknown method declaration keyword; expected @exec, @args_input, or @args_output")
 		}
 	case "relations":
-		key, value, err := parseAssignment(text)
+		assignment, err := parseAssignment(text)
 		if err != nil {
-			return platform.Wrap(platform.CodeParse, err, lineMessage(lineNo, "invalid relation entry"))
+			return parseWrapAt(lineNo, text, 1, spanWidth(firstToken(text)), "invalid relation entry", err)
 		}
-		doc.Relations = append(doc.Relations, RelationRule{Name: strings.TrimSpace(key), Condition: strings.TrimSpace(value)})
+		doc.Relations = append(doc.Relations, RelationRule{Name: strings.TrimSpace(assignment.Key), Condition: strings.TrimSpace(assignment.Value)})
 		return nil
 	default:
-		return parseError(lineNo, "unexpected indented declaration")
+		return parseErrorAt(lineNo, text, 1, spanWidth(firstToken(text)), "unexpected indented declaration")
 	}
 }
 
@@ -200,17 +202,17 @@ func parseLevelTwo(doc *Document, state *parserState, text string, lineNo int) e
 		return parseMetadataField(doc, text, lineNo)
 	}
 	if state.section != "method" || state.currentMethod == nil || state.nestedSection == "" {
-		return parseError(lineNo, "nested declarations are only valid under @metadata, @args_input, or @args_output")
+		return parseErrorAt(lineNo, text, 1, spanWidth(firstToken(text)), "nested declarations are only valid under @metadata, @args_input, or @args_output")
 	}
-	key, value, err := parseAssignment(text)
+	assignment, err := parseAssignment(text)
 	if err != nil {
-		return platform.Wrap(platform.CodeParse, err, lineMessage(lineNo, "invalid nested declaration"))
+		return parseWrapAt(lineNo, text, 1, spanWidth(firstToken(text)), "invalid nested declaration", err)
 	}
-	switch key {
+	switch assignment.Key {
 	case "decl_args":
-		params, err := parseParameters(value)
+		params, err := parseParameters(assignment.Value)
 		if err != nil {
-			return platform.Wrap(platform.CodeParse, err, lineMessage(lineNo, "invalid decl_args value"))
+			return parseWrapAt(lineNo, text, assignment.ValueColumn, assignment.ValueWidth, "invalid decl_args value", err)
 		}
 		if state.nestedSection == "input" {
 			state.currentMethod.InputArgs = params
@@ -220,25 +222,25 @@ func parseLevelTwo(doc *Document, state *parserState, text string, lineNo int) e
 		return nil
 	case "decl_format":
 		if state.nestedSection != "output" {
-			return parseError(lineNo, "decl_format is only allowed under @args_output")
+			return parseErrorAt(lineNo, text, assignment.KeyColumn, assignment.KeyWidth, "decl_format is only allowed under @args_output")
 		}
-		state.currentMethod.OutputFormat, err = ParsePayloadFormat(value)
+		state.currentMethod.OutputFormat, err = ParsePayloadFormat(assignment.Value)
 		if err != nil {
-			return platform.Wrap(platform.CodeParse, err, lineMessage(lineNo, "invalid decl_format value"))
+			return parseWrapAt(lineNo, text, assignment.ValueColumn, assignment.ValueWidth, "invalid decl_format value", err)
 		}
 		return nil
 	default:
-		return parseError(lineNo, "unknown nested declaration keyword")
+		return parseErrorAt(lineNo, text, assignment.KeyColumn, assignment.KeyWidth, "unknown nested declaration keyword; expected decl_args or decl_format")
 	}
 }
 
 func parseMetadataField(doc *Document, text string, lineNo int) error {
-	key, value, err := parseAssignment(text)
+	assignment, err := parseAssignment(text)
 	if err != nil {
-		return platform.Wrap(platform.CodeParse, err, lineMessage(lineNo, "invalid metadata entry"))
+		return parseWrapAt(lineNo, text, 1, spanWidth(firstToken(text)), "invalid metadata entry", err)
 	}
-	value = strings.TrimSpace(value)
-	switch key {
+	value := strings.TrimSpace(assignment.Value)
+	switch assignment.Key {
 	case "description":
 		doc.Metadata.Description = value
 		return nil
@@ -252,21 +254,42 @@ func parseMetadataField(doc *Document, text string, lineNo int) error {
 		doc.Metadata.Tags = parseCSV(value)
 		return nil
 	default:
-		return parseError(lineNo, "unknown metadata field")
+		return parseErrorAt(lineNo, text, assignment.KeyColumn, assignment.KeyWidth, "unknown metadata field; expected description, tags, display_name, or category")
 	}
 }
 
-func parseAssignment(text string) (string, string, error) {
+type assignment struct {
+	Key         string
+	Value       string
+	KeyColumn   int
+	KeyWidth    int
+	ValueColumn int
+	ValueWidth  int
+}
+
+func parseAssignment(text string) (assignment, error) {
 	parts := strings.SplitN(text, ":", 2)
 	if len(parts) != 2 {
-		return "", "", platform.New(platform.CodeParse, "expected key: value")
+		return assignment{}, platform.New(platform.CodeParse, "expected key: value")
 	}
 	key := strings.TrimSpace(parts[0])
 	value := strings.TrimSpace(parts[1])
 	if key == "" {
-		return "", "", platform.New(platform.CodeParse, "assignment key is required")
+		return assignment{}, platform.New(platform.CodeParse, "assignment key is required")
 	}
-	return key, value, nil
+	keyColumn := strings.Index(text, key) + 1
+	valueColumn := len(parts[0]) + 2
+	if value != "" {
+		valueColumn = strings.Index(text, value) + 1
+	}
+	return assignment{
+		Key:         key,
+		Value:       value,
+		KeyColumn:   maxInt(1, keyColumn),
+		KeyWidth:    spanWidth(key),
+		ValueColumn: maxInt(1, valueColumn),
+		ValueWidth:  spanWidth(value),
+	}, nil
 }
 
 func parseOptionalCount(raw string) (int, error) {
@@ -288,18 +311,24 @@ func parseParameters(raw string) ([]Parameter, error) {
 	}
 	parts := strings.Split(value, ",")
 	params := make([]Parameter, 0, len(parts))
+	offset := 0
 	for _, part := range parts {
 		pair := strings.TrimSpace(part)
+		leading := len(part) - len(strings.TrimLeft(part, " "))
+		pairColumn := offset + leading + 1
 		segments := strings.Split(pair, ".")
 		if len(segments) != 2 {
-			return nil, platform.New(platform.CodeParse, fmt.Sprintf("invalid parameter declaration %q", pair))
+			return nil, &spanError{Column: pairColumn, Width: spanWidth(pair), Message: fmt.Sprintf("invalid parameter declaration %q", pair)}
 		}
 		name := strings.TrimSpace(segments[0])
-		argType, err := ParseArgType(segments[1])
+		typeToken := strings.TrimSpace(segments[1])
+		argType, err := ParseArgType(typeToken)
 		if err != nil {
-			return nil, err
+			typeColumn := pairColumn + strings.Index(pair, typeToken)
+			return nil, &spanError{Column: typeColumn, Width: spanWidth(typeToken), Message: parseDetail(err)}
 		}
 		params = append(params, Parameter{Name: name, Type: argType})
+		offset += len(part) + 1
 	}
 	return params, nil
 }
@@ -335,10 +364,112 @@ func leadingSpaces(raw string) int {
 	return count
 }
 
-func parseError(lineNo int, message string) error {
-	return platform.New(platform.CodeParse, lineMessage(lineNo, message))
+type spanError struct {
+	Column  int
+	Width   int
+	Message string
 }
 
-func lineMessage(lineNo int, message string) string {
-	return fmt.Sprintf("line %d: %s", lineNo, message)
+func (e *spanError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Message
+}
+
+func parseError(lineNo int, source string, message string) error {
+	return parseErrorAt(lineNo, source, 1, spanWidth(firstToken(source)), message)
+}
+
+func parseErrorAt(lineNo int, source string, column int, width int, message string) error {
+	return platform.New(platform.CodeParse, lineMessage(lineNo, source, column, width, message))
+}
+
+func parseWrap(lineNo int, source string, message string, err error) error {
+	return parseWrapAt(lineNo, source, 1, 1, message, err)
+}
+
+func parseWrapAt(lineNo int, source string, column int, width int, message string, err error) error {
+	detail := parseDetail(err)
+	var span *spanError
+	if errors.As(err, &span) {
+		column += span.Column - 1
+		width = span.Width
+	}
+	if detail == "" {
+		return parseErrorAt(lineNo, source, column, width, message)
+	}
+	return platform.New(platform.CodeParse, fmt.Sprintf("%s: %s", lineMessage(lineNo, source, column, width, message), detail))
+}
+
+func parseDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	if coded := platform.As(err); coded != nil {
+		return coded.Message
+	}
+	return err.Error()
+}
+
+func lineMessage(lineNo int, source string, column int, width int, message string) string {
+	line := strings.TrimRight(stripComments(source), " ")
+	if line == "" {
+		line = source
+	}
+	if line == "" {
+		return fmt.Sprintf("line %d, column %d: %s", lineNo, column, message)
+	}
+	column = maxInt(1, column)
+	width = maxInt(1, width)
+	return fmt.Sprintf("line %d, column %d: %s; source: %q; pointer: %q", lineNo, column, message, line, pointerLine(line, column, width))
+}
+
+func pointerLine(source string, column int, width int) string {
+	if column < 1 {
+		column = 1
+	}
+	if width < 1 {
+		width = 1
+	}
+	lineLen := len(source)
+	if lineLen == 0 {
+		return "^"
+	}
+	if column > lineLen {
+		column = lineLen
+	}
+	maxWidth := lineLen - column + 1
+	if maxWidth < 1 {
+		maxWidth = 1
+	}
+	if width > maxWidth {
+		width = maxWidth
+	}
+	return strings.Repeat(" ", column-1) + strings.Repeat("^", width)
+}
+
+func firstToken(text string) string {
+	if text == "" {
+		return ""
+	}
+	parts := strings.Fields(text)
+	if len(parts) == 0 {
+		return ""
+	}
+	return parts[0]
+}
+
+func spanWidth(token string) int {
+	if token == "" {
+		return 1
+	}
+	return len(token)
+}
+
+func maxInt(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
