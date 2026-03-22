@@ -17,6 +17,7 @@ import (
 	"github.com/million-in/clerm/internal/capability"
 	"github.com/million-in/clerm/internal/clermcfg"
 	"github.com/million-in/clerm/internal/clermreq"
+	"github.com/million-in/clerm/internal/clermresp"
 	"github.com/million-in/clerm/internal/jsonwire"
 	"github.com/million-in/clerm/internal/platform"
 	"github.com/million-in/clerm/internal/resolver"
@@ -342,9 +343,9 @@ func runServe(logger *slog.Logger, streams Streams, args []string) error {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Addr: *listen, Handler: service.Handler()}
+	server := &http.Server{Addr: *listen, Handler: resolver.NewDaemonHandler(logger, service)}
 	if logger != nil {
-		logger.Info("starting clerm resolver endpoint", "listen", *listen, "schema", service.Document().Name)
+		logger.Info("starting clerm resolver daemon", "listen", *listen, "schema", service.Document().Name, "schema_fingerprint", fmt.Sprintf("%x", service.Document().PublicFingerprint()))
 	}
 	_, _ = fmt.Fprintf(streams.Stdout, "%s\n", *listen)
 	return server.ListenAndServe()
@@ -496,12 +497,12 @@ func runShellenv(streams Streams) error {
 func printUsage(w io.Writer) {
 	_, _ = io.WriteString(w, "clerm\n")
 	_, _ = io.WriteString(w, "\n")
-	_, _ = io.WriteString(w, "CLERM compiler, request builder, registry RPC client, resolver decoder, and benchmark tool.\n")
+	_, _ = io.WriteString(w, "CLERM compiler, request builder, registry RPC client, local resolver daemon, and benchmark tool.\n")
 	_, _ = io.WriteString(w, "\n")
 	_, _ = io.WriteString(w, "usage:\n")
 	_, _ = io.WriteString(w, "  clerm <schema.clermfile> [out.clermcfg]\n")
 	_, _ = io.WriteString(w, "  clerm compile   -in schema.clermfile [-out schema.clermcfg]\n")
-	_, _ = io.WriteString(w, "  clerm inspect   -in <schema.clermfile|schema.clermcfg|request.clerm> [-internal]\n")
+	_, _ = io.WriteString(w, "  clerm inspect   -in <schema.clermfile|schema.clermcfg|request.clerm|response.clerm> [-internal]\n")
 	_, _ = io.WriteString(w, "  clerm register  -registry http://127.0.0.1:8090 -in schema.clermcfg -owner seller-1\n")
 	_, _ = io.WriteString(w, "  clerm search    -registry http://127.0.0.1:8090 -consumer buyer-1 -query books\n")
 	_, _ = io.WriteString(w, "  clerm discover  -registry http://127.0.0.1:8090 -consumer buyer-1 -query books\n")
@@ -514,7 +515,7 @@ func printUsage(w io.Writer) {
 	_, _ = io.WriteString(w, "  clerm request   -schema schema.clermcfg -method @... -data '{...}' [-cap-file capability.token] [-out request.clerm]\n")
 	_, _ = io.WriteString(w, "  clerm invoke    -registry http://127.0.0.1:8090 (-fingerprint <registered-fingerprint>|-schema schema.clermcfg) -request request.clerm\n")
 	_, _ = io.WriteString(w, "  clerm resolve   -schema schema.clermcfg -request request.clerm [-target registry.discover] [-cap-public-key clerm.ed25519.pub]  # debug\n")
-	_, _ = io.WriteString(w, "  clerm serve     -schema schema.clermcfg [-listen :8080] [-cap-public-key clerm.ed25519.pub]  # debug\n")
+	_, _ = io.WriteString(w, "  clerm serve     -schema schema.clermcfg [-listen 127.0.0.1:8181] [-cap-public-key clerm.ed25519.pub]  # local resolver daemon\n")
 	_, _ = io.WriteString(w, "  clerm benchmark -schema schema.clermcfg -method @... -data-file payload [-iterations 100000]\n")
 	_, _ = io.WriteString(w, "  clerm shellenv\n")
 	_, _ = io.WriteString(w, "\n")
@@ -595,6 +596,13 @@ func inspectPath(path string, internal bool) (any, error) {
 		}
 		return map[string]any{"kind": "clerm", "request": inspectableRequest(request)}, nil
 	}
+	if clermresp.IsEncoded(data) {
+		response, err := clermresp.Decode(data)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"kind": "clerm_response", "response": inspectableResponse(response)}, nil
+	}
 	return nil, platform.New(platform.CodeValidation, "unsupported inspect input")
 }
 
@@ -633,6 +641,21 @@ func inspectableRequest(request *clermreq.Request) any {
 		} else {
 			result["capability_error"] = err.Error()
 		}
+	}
+	return result
+}
+
+func inspectableResponse(response *clermresp.Response) any {
+	result := map[string]any{
+		"method": response.Method,
+	}
+	if response.Error.Code != "" || response.Error.Message != "" {
+		result["error"] = response.Error
+		return result
+	}
+	result["outputs"] = response.Outputs
+	if values, err := response.AsMap(); err == nil {
+		result["decoded_outputs"] = values
 	}
 	return result
 }

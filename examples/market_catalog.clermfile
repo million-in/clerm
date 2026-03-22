@@ -1,0 +1,29 @@
+# catalog discovery and product lookup
+schema @general.avail.mandene
+  @metadata:
+    description: Market catalog search and product detail schema
+    tags: catalog, search, products
+    display_name: Market Catalog
+    category: commerce
+  @route: https://catalog.internal.example/clerm
+  service: @global.market.search_products.v1
+  service: @global.market.product_details.v1
+
+method @global.market.search_products.v1
+  @exec: async.pool
+  @args_input: 2
+    decl_args: query.STRING, filters.ARRAY
+  @args_output: 2
+    decl_args: request_id.UUID, products.ARRAY
+    decl_format: json
+
+method @global.market.product_details.v1
+  @exec: sync
+  @args_input: 1
+    decl_args: product_id.STRING
+  @args_output: 2
+    decl_args: product_id.STRING, details.ARRAY
+    decl_format: json
+
+relations @general.mandene
+  @global: any.protected

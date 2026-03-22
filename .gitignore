@@ -24,3 +24,5 @@ clerm
 /descriptions.md
 /PROJECT.MD 
 *.refresh
+other_servers/rust/target/
+other_servers/python/__pycache__/

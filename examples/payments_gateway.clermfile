@@ -1,0 +1,29 @@
+# payment authorization and capture
+schema @general.avail.mandene
+  @metadata:
+    description: Payment authorization and capture schema
+    tags: payments, checkout, capture
+    display_name: Payments Gateway
+    category: finance
+  @route: https://payments.internal.example/clerm
+  service: @verified.payments.authorize_charge.v1
+  service: @verified.payments.capture_charge.v1
+
+method @verified.payments.authorize_charge.v1
+  @exec: sync
+  @args_input: 3
+    decl_args: payment_token.STRING, amount.DECIMAL, currency.STRING
+  @args_output: 2
+    decl_args: authorization_id.STRING, status.STRING
+    decl_format: json
+
+method @verified.payments.capture_charge.v1
+  @exec: sync
+  @args_input: 2
+    decl_args: authorization_id.STRING, amount.DECIMAL
+  @args_output: 2
+    decl_args: capture_id.STRING, status.STRING
+    decl_format: json
+
+relations @general.mandene
+  @verified: auth.required

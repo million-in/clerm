@@ -3,13 +3,10 @@ package clermreq
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
-	"sort"
-	"strings"
-	"time"
 	"unsafe"
 
 	"github.com/million-in/clerm/internal/capability"
+	"github.com/million-in/clerm/internal/clermwire"
 	"github.com/million-in/clerm/internal/platform"
 	"github.com/million-in/clerm/internal/schema"
 )
@@ -38,47 +35,13 @@ func Magic() [4]byte {
 }
 
 func Build(method schema.Method, payloadJSON []byte) (*Request, error) {
-	trimmed := strings.TrimSpace(string(payloadJSON))
-	if trimmed == "" {
-		trimmed = "{}"
+	values, err := clermwire.BuildValues(method.InputArgs, payloadJSON, "request argument")
+	if err != nil {
+		return nil, err
 	}
-	var payload map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
-		return nil, platform.Wrap(platform.CodeParse, err, "parse request payload JSON")
-	}
-	unknown := make([]string, 0)
-	for key := range payload {
-		known := false
-		for _, param := range method.InputArgs {
-			if param.Name == key {
-				known = true
-				break
-			}
-		}
-		if !known {
-			unknown = append(unknown, key)
-		}
-	}
-	if len(unknown) > 0 {
-		sort.Strings(unknown)
-		return nil, platform.New(platform.CodeValidation, fmt.Sprintf("unknown request arguments: %s", strings.Join(unknown, ", ")))
-	}
-
-	request := &Request{Method: method.Reference.Raw}
-	for _, input := range method.InputArgs {
-		raw, exists := payload[input.Name]
-		if !exists {
-			return nil, platform.New(platform.CodeValidation, fmt.Sprintf("missing required request argument %s", input.Name))
-		}
-		compact := bytes.Buffer{}
-		if err := json.Compact(&compact, raw); err != nil {
-			return nil, platform.Wrap(platform.CodeValidation, err, fmt.Sprintf("invalid JSON for %s", input.Name))
-		}
-		normalized := json.RawMessage(append([]byte(nil), compact.Bytes()...))
-		if err := validateValue(input.Type, normalized); err != nil {
-			return nil, platform.Wrap(platform.CodeValidation, err, fmt.Sprintf("invalid value for %s", input.Name))
-		}
-		request.Arguments = append(request.Arguments, Argument{Name: input.Name, Type: input.Type, Raw: normalized})
+	request := &Request{Method: method.Reference.Raw, Arguments: make([]Argument, len(values))}
+	for i, value := range values {
+		request.Arguments[i] = Argument{Name: value.Name, Type: value.Type, Raw: value.Raw}
 	}
 	return request, nil
 }
@@ -91,33 +54,33 @@ func (r *Request) ValidateAgainst(method schema.Method) error {
 		return platform.New(platform.CodeValidation, "request method does not match schema method")
 	}
 	if len(r.Arguments) != len(method.InputArgs) {
-		return platform.New(platform.CodeValidation, "request argument count does not match method definition")
+		return platform.New(platform.CodeValidation, "request argument count does not match schema definition")
 	}
 	for i, arg := range r.Arguments {
 		expected := method.InputArgs[i]
 		if arg.Name != expected.Name {
-			return platform.New(platform.CodeValidation, fmt.Sprintf("request argument order mismatch for %s", expected.Name))
+			return platform.New(platform.CodeValidation, "request argument order mismatch for "+expected.Name)
 		}
 		if arg.Type != expected.Type {
-			return platform.New(platform.CodeValidation, fmt.Sprintf("request argument type mismatch for %s", arg.Name))
+			return platform.New(platform.CodeValidation, "request argument type mismatch for "+arg.Name)
 		}
-		if err := validateValue(arg.Type, arg.Raw); err != nil {
-			return platform.Wrap(platform.CodeValidation, err, fmt.Sprintf("invalid request argument %s", arg.Name))
+		if err := clermwire.ValidateValue(arg.Type, arg.Raw); err != nil {
+			return platform.Wrap(platform.CodeValidation, err, "invalid request argument "+arg.Name)
 		}
 	}
 	return nil
 }
 
 func (r *Request) AsMap() (map[string]any, error) {
-	values := make(map[string]any, len(r.Arguments))
+	out := make(map[string]any, len(r.Arguments))
 	for _, arg := range r.Arguments {
-		value, err := decodeValue(arg.Type, arg.Raw)
+		value, err := clermwire.DecodeValue(arg.Type, arg.Raw)
 		if err != nil {
 			return nil, err
 		}
-		values[arg.Name] = value
+		out[arg.Name] = value
 	}
-	return values, nil
+	return out, nil
 }
 
 func Encode(request *Request) ([]byte, error) {
@@ -212,91 +175,6 @@ func Decode(data []byte) (*Request, error) {
 
 func IsEncoded(data []byte) bool {
 	return len(data) >= len(magic) && bytes.Equal(data[:len(magic)], magic[:])
-}
-
-func validateValue(argType schema.ArgType, raw json.RawMessage) error {
-	switch argType {
-	case schema.ArgString:
-		var value string
-		return json.Unmarshal(raw, &value)
-	case schema.ArgDecimal:
-		var value float64
-		return json.Unmarshal(raw, &value)
-	case schema.ArgUUID:
-		var value string
-		if err := json.Unmarshal(raw, &value); err != nil {
-			return err
-		}
-		if !looksLikeUUID(value) {
-			return platform.New(platform.CodeValidation, "UUID values must use canonical xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx format")
-		}
-		return nil
-	case schema.ArgArray:
-		var value []json.RawMessage
-		return json.Unmarshal(raw, &value)
-	case schema.ArgTimestamp:
-		var value string
-		if err := json.Unmarshal(raw, &value); err != nil {
-			return err
-		}
-		if _, err := time.Parse(time.RFC3339, value); err != nil {
-			return platform.New(platform.CodeValidation, "timestamps must be RFC3339 strings")
-		}
-		return nil
-	case schema.ArgInt:
-		var value int64
-		return json.Unmarshal(raw, &value)
-	case schema.ArgBool:
-		var value bool
-		return json.Unmarshal(raw, &value)
-	default:
-		return platform.New(platform.CodeValidation, "unknown request argument type")
-	}
-}
-
-func decodeValue(argType schema.ArgType, raw json.RawMessage) (any, error) {
-	switch argType {
-	case schema.ArgString, schema.ArgUUID, schema.ArgTimestamp:
-		var value string
-		return value, json.Unmarshal(raw, &value)
-	case schema.ArgDecimal:
-		var value float64
-		return value, json.Unmarshal(raw, &value)
-	case schema.ArgArray:
-		var value []any
-		return value, json.Unmarshal(raw, &value)
-	case schema.ArgInt:
-		var value int64
-		return value, json.Unmarshal(raw, &value)
-	case schema.ArgBool:
-		var value bool
-		return value, json.Unmarshal(raw, &value)
-	default:
-		return nil, platform.New(platform.CodeValidation, "unknown request argument type")
-	}
-}
-
-func looksLikeUUID(value string) bool {
-	if len(value) != 36 {
-		return false
-	}
-	for i, r := range value {
-		switch i {
-		case 8, 13, 18, 23:
-			if r != '-' {
-				return false
-			}
-		default:
-			if !isHex(r) {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func isHex(r rune) bool {
-	return (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
 }
 
 func encodedSize(request *Request) int {

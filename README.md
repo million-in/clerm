@@ -17,8 +17,11 @@ This repository contains:
 - schema parsing and validation
 - `.clermcfg` compilation and inspection
 - `.clerm` request generation and inspection
+- CLERM response encoding and inspection
+- embeddable Go resolver runtime
+- local `clerm-resolver` daemon for non-Go projects
 - public registry RPC client commands
-- offline decode and debug resolver tools
+- offline decode and local resolver tools
 - binary vs JSON benchmarks
 
 The private `clerm_registry` service is a separate repository. It stores `.clermcfg`, indexes discovery metadata, manages relationships, issues invoke tokens, refreshes sessions, and routes requests using hidden schema routes.
@@ -38,6 +41,7 @@ That metadata is compiled into `.clermcfg` and used by the registry for search a
 
 ```bash
 make build
+make build-resolver
 eval "$(bin/clerm shellenv)"
 clerm help
 ```
@@ -64,7 +68,7 @@ clerm benchmark
 clerm shellenv
 ```
 
-`resolve` and `serve` remain local debug tools. Production authority flows go through `clerm_registry`.
+`resolve` remains a local decode/debug tool. `serve` now runs the local resolver daemon. Production authority flows for discovery, relationships, and token issuance still go through `clerm_registry`.
 
 ## Quick Start
 
@@ -158,10 +162,20 @@ clerm token refresh \
 
 ```bash
 go test ./... -count=1
+make bench-resolver
 make bench
 make bench-split
 make bench-escape
 make bench-profile
 ```
+
+Resolver docs live in `docs/`.
+
+- `docs/README.md`
+- `docs/resolver-architecture.md`
+- `docs/resolver-go.md`
+- `docs/resolver-daemon.md`
+- `docs/other-languages.md`
+- `docs/resolver-testing.md`
 
 A full setup and command walkthrough is in `examples/setup.md`.

@@ -1,23 +1,30 @@
 GOCACHE_DIR := $(CURDIR)/.cache/go-build
 GO_BENCH_ENV := mkdir -p $(GOCACHE_DIR) .bench && env GOCACHE=$(GOCACHE_DIR)
 
-.PHONY: build test-unit test-integration test-e2e test bench bench-split bench-escape bench-profile clean
+.PHONY: build build-resolver test-unit test-integration test-e2e test bench bench-resolver bench-split bench-escape bench-profile clean
 
 build:
 	mkdir -p bin
 	go build -o bin/clerm ./cmd/clerm
 
+build-resolver:
+	mkdir -p bin
+	go build -o bin/clerm-resolver ./cmd/clerm-resolver
+
 test-unit:
-	go test ./internal/schema ./internal/clermcfg ./internal/clermreq -count=1
+	go test ./internal/schema ./internal/clermcfg ./internal/clermreq ./internal/clermresp -count=1
 
 test-integration:
-	go test ./internal/resolver -count=1
+	go test ./internal/resolver ./internal/app/resolvercli -count=1
 
 test-e2e:
 	go test ./e2e -count=1
 
 bench:
-	$(GO_BENCH_ENV) go test ./internal/clermcfg ./internal/clermreq -bench . -benchmem -run '^$$'
+	$(GO_BENCH_ENV) go test ./internal/clermcfg ./internal/clermreq ./internal/resolver -bench . -benchmem -run '^$$'
+
+bench-resolver:
+	$(GO_BENCH_ENV) go test ./internal/resolver -bench . -benchmem -run '^$$'
 
 bench-split:
 	$(GO_BENCH_ENV) go test ./internal/clermcfg ./internal/clermreq -bench '^(BenchmarkDecodeCLERMCFG|BenchmarkDecodeCLERMCFGCodecOnly|BenchmarkValidateCLERMCFGSemantics|BenchmarkRoundTripCLERMCFG|BenchmarkRoundTripCLERMCFGCodecOnly|BenchmarkDecodeCLERMRequest|BenchmarkDecodeCLERMRequestCodecOnly|BenchmarkValidateCLERMRequestSemantics|BenchmarkRoundTripCLERMRequest|BenchmarkRoundTripCLERMRequestCodecOnly)(/.*)?$$' -benchmem -run '^$$'

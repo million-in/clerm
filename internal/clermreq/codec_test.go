@@ -148,7 +148,7 @@ relations @general.mandene
 	if err == nil {
 		t.Fatal("expected unknown argument error")
 	}
-	if !strings.Contains(err.Error(), "unknown request arguments") {
+	if !strings.Contains(err.Error(), "unknown request argument values") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
