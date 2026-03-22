@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/million-in/clerm/internal/app/clermcli"
 	"github.com/million-in/clerm/internal/capability"
+	"github.com/million-in/clerm/internal/clermcfg"
 	"github.com/million-in/clerm/internal/platform"
 	"github.com/million-in/clerm/internal/resolver"
 )
@@ -25,7 +27,6 @@ func TestCLICompileRequestResolveAndServe(t *testing.T) {
 	payloadPath := filepath.Join(tmpDir, "payload")
 	verifiedPayloadPath := filepath.Join(tmpDir, "book_visit.payload")
 	tokenPath := filepath.Join(tmpDir, "visit.token")
-	privateKeyPath := filepath.Join(tmpDir, "dev.ed25519")
 	publicKeyPath := filepath.Join(tmpDir, "dev.ed25519.pub")
 
 	if err := os.WriteFile(schemaPath, []byte(`
@@ -77,12 +78,6 @@ relations @general.mandene
 	stdout.Reset()
 	stderr.Reset()
 
-	if err := clermcli.RunWithIO(logger, clermcli.Streams{Stdout: stdout, Stderr: stderr}, []string{"token", "keygen", "-out-private", privateKeyPath, "-out-public", publicKeyPath}); err != nil {
-		t.Fatalf("token keygen error = %v stderr=%s", err, stderr.String())
-	}
-	stdout.Reset()
-	stderr.Reset()
-
 	if err := clermcli.RunWithIO(logger, clermcli.Streams{Stdout: stdout, Stderr: stderr}, []string{"request", "-schema", cfgPath, "-method", "@global.healthcare.search_providers.v1", "-allow", "@global", "-data-file", payloadPath, "-out", reqPath}); err != nil {
 		t.Fatalf("request error = %v stderr=%s", err, stderr.String())
 	}
@@ -95,8 +90,45 @@ relations @general.mandene
 	stdout.Reset()
 	stderr.Reset()
 
-	if err := clermcli.RunWithIO(logger, clermcli.Streams{Stdout: stdout, Stderr: stderr}, []string{"token", "issue", "-schema", cfgPath, "-method", "@verified.healthcare.book_visit.v1", "-issuer", "registry", "-subject", "partner-123", "-private-key", privateKeyPath, "-out", tokenPath}); err != nil {
-		t.Fatalf("token issue error = %v stderr=%s", err, stderr.String())
+	cfgBytes, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("ReadFile(config) error = %v", err)
+	}
+	doc, err := clermcfg.Decode(cfgBytes)
+	if err != nil {
+		t.Fatalf("Decode(config) error = %v", err)
+	}
+	publicKey, privateKey, err := capability.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair() error = %v", err)
+	}
+	if err := capability.WritePublicKeyFile(publicKeyPath, publicKey); err != nil {
+		t.Fatalf("WritePublicKeyFile() error = %v", err)
+	}
+	now := time.Now().UTC()
+	token, err := capability.Issue(capability.IssueOptions{
+		KeyID:      "default",
+		Issuer:     "clerm_registry",
+		Subject:    "partner-123",
+		Schema:     doc.Name,
+		SchemaHash: doc.PublicFingerprint(),
+		Relation:   "@verified",
+		Condition:  "auth.required",
+		Methods:    []string{"@verified.healthcare.book_visit.v1"},
+		Targets:    []string{"registry.invoke"},
+		IssuedAt:   now,
+		NotBefore:  now,
+		ExpiresAt:  now.Add(30 * time.Minute),
+	}, privateKey)
+	if err != nil {
+		t.Fatalf("Issue() error = %v", err)
+	}
+	encodedToken, err := capability.EncodeText(token)
+	if err != nil {
+		t.Fatalf("EncodeText() error = %v", err)
+	}
+	if err := os.WriteFile(tokenPath, []byte(encodedToken+"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(token) error = %v", err)
 	}
 	stdout.Reset()
 	stderr.Reset()
@@ -197,7 +229,7 @@ relations @general.mandene
 	if err != nil {
 		t.Fatalf("LoadConfig(verified) error = %v", err)
 	}
-	publicKey, err := capability.ReadPublicKeyFile(publicKeyPath)
+	publicKey, err = capability.ReadPublicKeyFile(publicKeyPath)
 	if err != nil {
 		t.Fatalf("ReadPublicKeyFile() error = %v", err)
 	}

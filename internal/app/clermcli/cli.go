@@ -67,10 +67,20 @@ func RunWithIO(logger *slog.Logger, streams Streams, args []string) error {
 		return runCompile(logger, streams, args[1:])
 	case "inspect":
 		return runInspect(streams, args[1:])
+	case "register":
+		return runRegister(streams, args[1:])
+	case "search":
+		return runSearch(streams, args[1:])
+	case "discover":
+		return runDiscover(streams, args[1:])
+	case "relationship":
+		return runRelationship(streams, args[1:])
 	case "token":
 		return runToken(streams, args[1:])
 	case "request":
 		return runRequest(streams, args[1:])
+	case "invoke":
+		return runInvoke(streams, args[1:])
 	case "resolve":
 		return runResolve(streams, args[1:])
 	case "serve":
@@ -148,15 +158,17 @@ func runInspect(streams Streams, args []string) error {
 
 func runToken(streams Streams, args []string) error {
 	if len(args) == 0 {
-		return platform.New(platform.CodeInvalidArgument, "token requires a subcommand: keygen, issue, inspect")
+		return platform.New(platform.CodeInvalidArgument, "token requires a subcommand: issue, refresh, inspect")
 	}
 	switch args[0] {
-	case "keygen":
-		return runTokenKeygen(streams, args[1:])
 	case "issue":
 		return runTokenIssue(streams, args[1:])
+	case "refresh":
+		return runTokenRefresh(streams, args[1:])
 	case "inspect":
 		return runTokenInspect(streams, args[1:])
+	case "keygen":
+		return platform.New(platform.CodeInvalidArgument, "token keygen is not supported in the public CLI; the registry manages signing keys")
 	default:
 		return platform.New(platform.CodeInvalidArgument, "invalid token subcommand")
 	}
@@ -185,82 +197,7 @@ func runTokenKeygen(streams Streams, args []string) error {
 }
 
 func runTokenIssue(streams Streams, args []string) error {
-	fs := flag.NewFlagSet("token issue", flag.ContinueOnError)
-	fs.SetOutput(streams.Stderr)
-	schemaPath := fs.String("schema", "", "path to .clermfile or .clermcfg")
-	methodRef := fs.String("method", "", "method reference to scope the token to")
-	relation := fs.String("relation", "", "relation to scope the token to when issuing a relation token")
-	targets := fs.String("targets", "", "comma-separated exact targets")
-	issuer := fs.String("issuer", "", "token issuer")
-	subject := fs.String("subject", "", "token subject")
-	privateKeyPath := fs.String("private-key", "", "path to Ed25519 private key file")
-	keyID := fs.String("key-id", "default", "signing key identifier")
-	tokenID := fs.String("token-id", "", "optional explicit token id")
-	ttl := fs.Duration("ttl", 30*time.Minute, "token lifetime")
-	out := fs.String("out", "", "optional path to write token text")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *schemaPath == "" || *issuer == "" || *subject == "" || *privateKeyPath == "" {
-		return platform.New(platform.CodeInvalidArgument, "token issue requires -schema, -issuer, -subject, and -private-key")
-	}
-	doc, err := loadDocument(*schemaPath)
-	if err != nil {
-		return err
-	}
-	scopeRelation := strings.TrimSpace(*relation)
-	methods := []string(nil)
-	if *methodRef != "" {
-		method, ok := doc.MethodByReference(*methodRef)
-		if !ok {
-			return platform.New(platform.CodeNotFound, "method not found in schema")
-		}
-		scopeRelation = method.Reference.Relation
-		methods = []string{method.Reference.Raw}
-	}
-	if scopeRelation == "" {
-		return platform.New(platform.CodeInvalidArgument, "token issue requires either -method or -relation")
-	}
-	condition, ok := doc.RelationCondition(scopeRelation)
-	if !ok {
-		return platform.New(platform.CodeValidation, "relation is not defined in schema")
-	}
-	privateKey, err := capability.ReadPrivateKeyFile(*privateKeyPath)
-	if err != nil {
-		return err
-	}
-	now := time.Now().UTC()
-	token, err := capability.Issue(capability.IssueOptions{
-		KeyID:      *keyID,
-		Issuer:     *issuer,
-		Subject:    *subject,
-		TokenID:    *tokenID,
-		Schema:     doc.Name,
-		SchemaHash: doc.PublicFingerprint(),
-		Relation:   scopeRelation,
-		Condition:  condition,
-		Methods:    methods,
-		Targets:    splitCSV(*targets),
-		IssuedAt:   now,
-		NotBefore:  now,
-		ExpiresAt:  now.Add(*ttl),
-	}, privateKey)
-	if err != nil {
-		return err
-	}
-	encoded, err := capability.EncodeText(token)
-	if err != nil {
-		return err
-	}
-	if *out != "" {
-		if err := os.WriteFile(*out, []byte(encoded+"\n"), 0o600); err != nil {
-			return platform.Wrap(platform.CodeIO, err, "write capability token")
-		}
-		_, _ = fmt.Fprintf(streams.Stdout, "%s\n", *out)
-		return nil
-	}
-	_, _ = fmt.Fprintf(streams.Stdout, "%s\n", encoded)
-	return nil
+	return runTokenIssueRPC(streams, args)
 }
 
 func runTokenInspect(streams Streams, args []string) error {
@@ -337,7 +274,7 @@ func runRequest(streams Streams, args []string) error {
 		return err
 	}
 	if requiresCapability(condition) && token == nil {
-		return platform.New(platform.CodeValidation, "capability token is required for this relation")
+		return platform.New(platform.CodeValidation, "capability token is required for this relation; obtain one from clerm_registry with `clerm token issue -registry ...`")
 	}
 	if token != nil {
 		if err := validateCapabilityScope(doc, method, condition, token); err != nil {
@@ -559,19 +496,25 @@ func runShellenv(streams Streams) error {
 func printUsage(w io.Writer) {
 	_, _ = io.WriteString(w, "clerm\n")
 	_, _ = io.WriteString(w, "\n")
-	_, _ = io.WriteString(w, "CLERM compiler, request builder, resolver decoder, and benchmark tool.\n")
+	_, _ = io.WriteString(w, "CLERM compiler, request builder, registry RPC client, resolver decoder, and benchmark tool.\n")
 	_, _ = io.WriteString(w, "\n")
 	_, _ = io.WriteString(w, "usage:\n")
 	_, _ = io.WriteString(w, "  clerm <schema.clermfile> [out.clermcfg]\n")
 	_, _ = io.WriteString(w, "  clerm compile   -in schema.clermfile [-out schema.clermcfg]\n")
 	_, _ = io.WriteString(w, "  clerm inspect   -in <schema.clermfile|schema.clermcfg|request.clerm> [-internal]\n")
-	_, _ = io.WriteString(w, "  clerm token keygen [-out-private clerm.ed25519] [-out-public clerm.ed25519.pub]\n")
-	_, _ = io.WriteString(w, "  clerm token issue -schema schema.clermcfg (-method @...|-relation @verified) -issuer issuer -subject caller -private-key clerm.ed25519\n")
+	_, _ = io.WriteString(w, "  clerm register  -registry http://127.0.0.1:8090 -in schema.clermcfg -owner seller-1\n")
+	_, _ = io.WriteString(w, "  clerm search    -registry http://127.0.0.1:8090 -consumer buyer-1 -query books\n")
+	_, _ = io.WriteString(w, "  clerm discover  -registry http://127.0.0.1:8090 -consumer buyer-1 -query books\n")
+	_, _ = io.WriteString(w, "  clerm relationship establish -registry http://127.0.0.1:8090 -consumer buyer-1 -schema schema.clermcfg -relation @verified\n")
+	_, _ = io.WriteString(w, "  clerm relationship status -registry http://127.0.0.1:8090 -consumer buyer-1 -schema schema.clermcfg\n")
+	_, _ = io.WriteString(w, "  clerm token issue -registry http://127.0.0.1:8090 -consumer buyer-1 -schema schema.clermcfg (-method @...|-relation @verified)\n")
+	_, _ = io.WriteString(w, "  clerm token refresh -registry http://127.0.0.1:8090 -refresh-token <token>\n")
 	_, _ = io.WriteString(w, "  clerm token inspect -in capability.token\n")
 	_, _ = io.WriteString(w, "  clerm tools     -schema schema.clermcfg -allow @global,@verified\n")
 	_, _ = io.WriteString(w, "  clerm request   -schema schema.clermcfg -method @... -data '{...}' [-cap-file capability.token] [-out request.clerm]\n")
-	_, _ = io.WriteString(w, "  clerm resolve   -schema schema.clermcfg -request request.clerm [-target registry.discover] [-cap-public-key clerm.ed25519.pub]\n")
-	_, _ = io.WriteString(w, "  clerm serve     -schema schema.clermcfg [-listen :8080] [-cap-public-key clerm.ed25519.pub]\n")
+	_, _ = io.WriteString(w, "  clerm invoke    -registry http://127.0.0.1:8090 -schema schema.clermcfg -request request.clerm\n")
+	_, _ = io.WriteString(w, "  clerm resolve   -schema schema.clermcfg -request request.clerm [-target registry.discover] [-cap-public-key clerm.ed25519.pub]  # debug\n")
+	_, _ = io.WriteString(w, "  clerm serve     -schema schema.clermcfg [-listen :8080] [-cap-public-key clerm.ed25519.pub]  # debug\n")
 	_, _ = io.WriteString(w, "  clerm benchmark -schema schema.clermcfg -method @... -data-file payload [-iterations 100000]\n")
 	_, _ = io.WriteString(w, "  clerm shellenv\n")
 	_, _ = io.WriteString(w, "\n")
@@ -582,11 +525,11 @@ func printUsage(w io.Writer) {
 	_, _ = io.WriteString(w, "examples:\n")
 	_, _ = io.WriteString(w, "  make build\n")
 	_, _ = io.WriteString(w, "  eval \"$(bin/clerm shellenv)\"\n")
-	_, _ = io.WriteString(w, "  clerm token keygen -out-private dev.ed25519 -out-public dev.ed25519.pub\n")
 	_, _ = io.WriteString(w, "  clerm compile -in examples/provider_search.clermfile -out schemas/provider_search.clermcfg\n")
-	_, _ = io.WriteString(w, "  clerm token issue -schema schemas/provider_search.clermcfg -method @verified.healthcare.book_visit.v1 -issuer registry -subject partner-123 -private-key dev.ed25519 -out visit.token\n")
+	_, _ = io.WriteString(w, "  clerm register -registry http://127.0.0.1:8090 -in schemas/provider_search.clermcfg -owner seller-1\n")
+	_, _ = io.WriteString(w, "  clerm token issue -registry http://127.0.0.1:8090 -consumer buyer-1 -schema schemas/provider_search.clermcfg -method @verified.healthcare.book_visit.v1 -out-cap visit.token -out-refresh visit.refresh\n")
 	_, _ = io.WriteString(w, "  clerm request -schema schemas/provider_search.clermcfg -method @global.healthcare.search_providers.v1 -data-file examples/search_providers.payload\n")
-	_, _ = io.WriteString(w, "  clerm resolve -schema schemas/provider_search.clermcfg -request search_providers.clerm -target registry.discover -cap-public-key dev.ed25519.pub\n")
+	_, _ = io.WriteString(w, "  clerm invoke -registry http://127.0.0.1:8090 -schema schemas/provider_search.clermcfg -request search_providers.clerm\n")
 }
 
 func loadDocument(path string) (*schema.Document, error) {
