@@ -1,0 +1,30 @@
+# CLERM public schema source
+schema @general.avail.mandene
+  @metadata:
+    description: Search and booking schema for healthcare providers
+    tags: healthcare, search, booking
+    display_name: Provider Search
+    category: healthcare
+  @route: https://resolver.health.example/clerm
+  service: @global.healthcare.search_providers.v1
+  service: @verified.healthcare.book_visit.v1
+
+method @global.healthcare.search_providers.v1
+  @exec: async.pool
+  @args_input: 3
+    decl_args: specialty.STRING, latitude.DECIMAL, longitude.DECIMAL
+  @args_output: 2
+    decl_args: request_id.UUID, providers.ARRAY
+    decl_format: json
+
+method @verified.healthcare.book_visit.v1
+  @exec: sync
+  @args_input: 2
+    decl_args: provider_id.STRING, user_token.STRING
+  @args_output: 2
+    decl_args: order_id.STRING, status.STRING
+    decl_format: json
+
+relations @general.mandene
+  @global: any.protected
+  @verified: auth.required

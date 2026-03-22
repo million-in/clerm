@@ -1,0 +1,416 @@
+package clermreq
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+	"unsafe"
+
+	"github.com/million-in/clerm/internal/capability"
+	"github.com/million-in/clerm/internal/platform"
+	"github.com/million-in/clerm/internal/schema"
+)
+
+var magic = [4]byte{'C', 'L', 'R', 'M'}
+
+const (
+	legacyFormatVersion uint16 = 1
+	formatVersion       uint16 = 2
+)
+
+type Argument struct {
+	Name string          `json:"name"`
+	Type schema.ArgType  `json:"type"`
+	Raw  json.RawMessage `json:"raw"`
+}
+
+type Request struct {
+	Method        string     `json:"method"`
+	Arguments     []Argument `json:"arguments"`
+	CapabilityRaw []byte     `json:"-"`
+}
+
+func Magic() [4]byte {
+	return magic
+}
+
+func Build(method schema.Method, payloadJSON []byte) (*Request, error) {
+	trimmed := strings.TrimSpace(string(payloadJSON))
+	if trimmed == "" {
+		trimmed = "{}"
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+		return nil, platform.Wrap(platform.CodeParse, err, "parse request payload JSON")
+	}
+	unknown := make([]string, 0)
+	for key := range payload {
+		known := false
+		for _, param := range method.InputArgs {
+			if param.Name == key {
+				known = true
+				break
+			}
+		}
+		if !known {
+			unknown = append(unknown, key)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		return nil, platform.New(platform.CodeValidation, fmt.Sprintf("unknown request arguments: %s", strings.Join(unknown, ", ")))
+	}
+
+	request := &Request{Method: method.Reference.Raw}
+	for _, input := range method.InputArgs {
+		raw, exists := payload[input.Name]
+		if !exists {
+			return nil, platform.New(platform.CodeValidation, fmt.Sprintf("missing required request argument %s", input.Name))
+		}
+		compact := bytes.Buffer{}
+		if err := json.Compact(&compact, raw); err != nil {
+			return nil, platform.Wrap(platform.CodeValidation, err, fmt.Sprintf("invalid JSON for %s", input.Name))
+		}
+		normalized := json.RawMessage(append([]byte(nil), compact.Bytes()...))
+		if err := validateValue(input.Type, normalized); err != nil {
+			return nil, platform.Wrap(platform.CodeValidation, err, fmt.Sprintf("invalid value for %s", input.Name))
+		}
+		request.Arguments = append(request.Arguments, Argument{Name: input.Name, Type: input.Type, Raw: normalized})
+	}
+	return request, nil
+}
+
+func (r *Request) ValidateAgainst(method schema.Method) error {
+	if r == nil {
+		return platform.New(platform.CodeInvalidArgument, "request is required")
+	}
+	if r.Method != method.Reference.Raw {
+		return platform.New(platform.CodeValidation, "request method does not match schema method")
+	}
+	if len(r.Arguments) != len(method.InputArgs) {
+		return platform.New(platform.CodeValidation, "request argument count does not match method definition")
+	}
+	for i, arg := range r.Arguments {
+		expected := method.InputArgs[i]
+		if arg.Name != expected.Name {
+			return platform.New(platform.CodeValidation, fmt.Sprintf("request argument order mismatch for %s", expected.Name))
+		}
+		if arg.Type != expected.Type {
+			return platform.New(platform.CodeValidation, fmt.Sprintf("request argument type mismatch for %s", arg.Name))
+		}
+		if err := validateValue(arg.Type, arg.Raw); err != nil {
+			return platform.Wrap(platform.CodeValidation, err, fmt.Sprintf("invalid request argument %s", arg.Name))
+		}
+	}
+	return nil
+}
+
+func (r *Request) AsMap() (map[string]any, error) {
+	values := make(map[string]any, len(r.Arguments))
+	for _, arg := range r.Arguments {
+		value, err := decodeValue(arg.Type, arg.Raw)
+		if err != nil {
+			return nil, err
+		}
+		values[arg.Name] = value
+	}
+	return values, nil
+}
+
+func Encode(request *Request) ([]byte, error) {
+	if request == nil {
+		return nil, platform.New(platform.CodeInvalidArgument, "request is required")
+	}
+	if len(request.CapabilityRaw) > 0 {
+		if _, err := capability.Decode(request.CapabilityRaw); err != nil {
+			return nil, platform.Wrap(platform.CodeValidation, err, "invalid capability token on request")
+		}
+	}
+	buf := make([]byte, 0, encodedSize(request))
+	buf = append(buf, magic[:]...)
+	buf = appendUint16(buf, formatVersion)
+	buf = appendString(buf, request.Method)
+	buf = appendUint16(buf, uint16(len(request.Arguments)))
+	for _, arg := range request.Arguments {
+		buf = appendString(buf, arg.Name)
+		buf = append(buf, byte(arg.Type))
+		buf = appendBytes(buf, arg.Raw)
+	}
+	if len(request.CapabilityRaw) == 0 {
+		buf = append(buf, 0)
+		return buf, nil
+	}
+	buf = append(buf, 1)
+	buf = appendBytes(buf, request.CapabilityRaw)
+	return buf, nil
+}
+
+func Decode(data []byte) (*Request, error) {
+	dec := newDecoder(data)
+	header, err := dec.readFixed(4)
+	if err != nil {
+		return nil, platform.Wrap(platform.CodeIO, err, "read request magic")
+	}
+	if !bytes.Equal(header, magic[:]) {
+		return nil, platform.New(platform.CodeValidation, "invalid request magic header")
+	}
+	version, err := dec.readUint16()
+	if err != nil {
+		return nil, platform.Wrap(platform.CodeIO, err, "read request version")
+	}
+	if version != legacyFormatVersion && version != formatVersion {
+		return nil, platform.New(platform.CodeValidation, "unsupported request format version")
+	}
+	request := &Request{}
+	if request.Method, err = dec.readString(); err != nil {
+		return nil, platform.Wrap(platform.CodeIO, err, "read request method")
+	}
+	count, err := dec.readUint16()
+	if err != nil {
+		return nil, platform.Wrap(platform.CodeIO, err, "read request argument count")
+	}
+	request.Arguments = make([]Argument, count)
+	for i := 0; i < int(count); i++ {
+		name, err := dec.readString()
+		if err != nil {
+			return nil, platform.Wrap(platform.CodeIO, err, "read request argument name")
+		}
+		typeByte, err := dec.readByte()
+		if err != nil {
+			return nil, platform.Wrap(platform.CodeIO, err, "read request argument type")
+		}
+		raw, err := dec.readBytes()
+		if err != nil {
+			return nil, platform.Wrap(platform.CodeIO, err, "read request argument payload")
+		}
+		request.Arguments[i] = Argument{Name: name, Type: schema.ArgType(typeByte), Raw: raw}
+	}
+	if version >= formatVersion {
+		hasCapability, err := dec.readByte()
+		if err != nil {
+			return nil, platform.Wrap(platform.CodeIO, err, "read request capability marker")
+		}
+		if hasCapability > 1 {
+			return nil, platform.New(platform.CodeValidation, "invalid request capability marker")
+		}
+		if hasCapability == 1 {
+			token, err := dec.readBytes()
+			if err != nil {
+				return nil, platform.Wrap(platform.CodeIO, err, "read request capability token")
+			}
+			request.CapabilityRaw = token
+		}
+	}
+	if dec.remaining() != 0 {
+		return nil, platform.New(platform.CodeValidation, "unexpected trailing bytes in request")
+	}
+	return request, nil
+}
+
+func IsEncoded(data []byte) bool {
+	return len(data) >= len(magic) && bytes.Equal(data[:len(magic)], magic[:])
+}
+
+func validateValue(argType schema.ArgType, raw json.RawMessage) error {
+	switch argType {
+	case schema.ArgString:
+		var value string
+		return json.Unmarshal(raw, &value)
+	case schema.ArgDecimal:
+		var value float64
+		return json.Unmarshal(raw, &value)
+	case schema.ArgUUID:
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return err
+		}
+		if !looksLikeUUID(value) {
+			return platform.New(platform.CodeValidation, "UUID values must use canonical xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx format")
+		}
+		return nil
+	case schema.ArgArray:
+		var value []json.RawMessage
+		return json.Unmarshal(raw, &value)
+	case schema.ArgTimestamp:
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return err
+		}
+		if _, err := time.Parse(time.RFC3339, value); err != nil {
+			return platform.New(platform.CodeValidation, "timestamps must be RFC3339 strings")
+		}
+		return nil
+	case schema.ArgInt:
+		var value int64
+		return json.Unmarshal(raw, &value)
+	case schema.ArgBool:
+		var value bool
+		return json.Unmarshal(raw, &value)
+	default:
+		return platform.New(platform.CodeValidation, "unknown request argument type")
+	}
+}
+
+func decodeValue(argType schema.ArgType, raw json.RawMessage) (any, error) {
+	switch argType {
+	case schema.ArgString, schema.ArgUUID, schema.ArgTimestamp:
+		var value string
+		return value, json.Unmarshal(raw, &value)
+	case schema.ArgDecimal:
+		var value float64
+		return value, json.Unmarshal(raw, &value)
+	case schema.ArgArray:
+		var value []any
+		return value, json.Unmarshal(raw, &value)
+	case schema.ArgInt:
+		var value int64
+		return value, json.Unmarshal(raw, &value)
+	case schema.ArgBool:
+		var value bool
+		return value, json.Unmarshal(raw, &value)
+	default:
+		return nil, platform.New(platform.CodeValidation, "unknown request argument type")
+	}
+}
+
+func looksLikeUUID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for i, r := range value {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if !isHex(r) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isHex(r rune) bool {
+	return (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
+}
+
+func encodedSize(request *Request) int {
+	size := len(magic) + 2 + stringSize(request.Method) + 2
+	for _, arg := range request.Arguments {
+		size += stringSize(arg.Name) + 1 + 4 + len(arg.Raw)
+	}
+	size++
+	if len(request.CapabilityRaw) > 0 {
+		size += 4 + len(request.CapabilityRaw)
+	}
+	return size
+}
+
+func appendUint16(dst []byte, value uint16) []byte {
+	return append(dst, byte(value>>8), byte(value))
+}
+
+func appendUint32(dst []byte, value uint32) []byte {
+	return append(dst, byte(value>>24), byte(value>>16), byte(value>>8), byte(value))
+}
+
+func appendString(dst []byte, value string) []byte {
+	dst = appendUint16(dst, uint16(len(value)))
+	return append(dst, value...)
+}
+
+func appendBytes(dst []byte, value []byte) []byte {
+	dst = appendUint32(dst, uint32(len(value)))
+	return append(dst, value...)
+}
+
+func stringSize(value string) int {
+	return 2 + len(value)
+}
+
+type decoder struct {
+	data []byte
+	off  int
+}
+
+func newDecoder(data []byte) *decoder {
+	return &decoder{data: data}
+}
+
+func (d *decoder) readFixed(n int) ([]byte, error) {
+	if d.off+n > len(d.data) {
+		return nil, platform.New(platform.CodeIO, "unexpected end of input")
+	}
+	value := d.data[d.off : d.off+n]
+	d.off += n
+	return value, nil
+}
+
+func (d *decoder) readByte() (byte, error) {
+	if d.off >= len(d.data) {
+		return 0, platform.New(platform.CodeIO, "unexpected end of input")
+	}
+	value := d.data[d.off]
+	d.off++
+	return value, nil
+}
+
+func (d *decoder) readUint16() (uint16, error) {
+	if d.off+2 > len(d.data) {
+		return 0, platform.New(platform.CodeIO, "unexpected end of input")
+	}
+	value := uint16(d.data[d.off])<<8 | uint16(d.data[d.off+1])
+	d.off += 2
+	return value, nil
+}
+
+func (d *decoder) readUint32() (uint32, error) {
+	if d.off+4 > len(d.data) {
+		return 0, platform.New(platform.CodeIO, "unexpected end of input")
+	}
+	value := uint32(d.data[d.off])<<24 | uint32(d.data[d.off+1])<<16 | uint32(d.data[d.off+2])<<8 | uint32(d.data[d.off+3])
+	d.off += 4
+	return value, nil
+}
+
+func (d *decoder) readString() (string, error) {
+	length, err := d.readUint16()
+	if err != nil {
+		return "", err
+	}
+	if d.off+int(length) > len(d.data) {
+		return "", platform.New(platform.CodeIO, "unexpected end of input")
+	}
+	value := bytesToString(d.data[d.off : d.off+int(length)])
+	d.off += int(length)
+	return value, nil
+}
+
+func (d *decoder) readBytes() (json.RawMessage, error) {
+	length, err := d.readUint32()
+	if err != nil {
+		return nil, err
+	}
+	if d.off+int(length) > len(d.data) {
+		return nil, platform.New(platform.CodeIO, "unexpected end of input")
+	}
+	value := json.RawMessage(d.data[d.off : d.off+int(length)])
+	d.off += int(length)
+	return value, nil
+}
+
+func (d *decoder) remaining() int {
+	return len(d.data) - d.off
+}
+
+func bytesToString(value []byte) string {
+	if len(value) == 0 {
+		return ""
+	}
+	return unsafe.String(unsafe.SliceData(value), len(value))
+}
