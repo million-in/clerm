@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -54,6 +55,7 @@ func LoadConfigURLWithOptions(ctx context.Context, rawURL string, options LoadCo
 	if httpClient == nil {
 		httpClient = defaultHTTPClient()
 	}
+	httpClient = clientWithURLPolicy(ctx, httpClient, options.URLPolicy)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, trimmed, nil)
 	if err != nil {
 		return nil, platform.Wrap(platform.CodeInternal, err, "create schema request")
@@ -91,6 +93,25 @@ func defaultHTTPClient() *http.Client {
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 20,
 	})
+}
+
+func clientWithURLPolicy(ctx context.Context, httpClient *http.Client, policy URLPolicy) *http.Client {
+	if policy == nil {
+		return httpClient
+	}
+	cloned := *httpClient
+	previousCheckRedirect := cloned.CheckRedirect
+	cloned.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if previousCheckRedirect != nil {
+			if err := previousCheckRedirect(req, via); err != nil {
+				return err
+			}
+		} else if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return policy(ctx, req.URL)
+	}
+	return &cloned
 }
 
 func readConfigPayload(response *http.Response, maxPayloadBytes int64) ([]byte, error) {
