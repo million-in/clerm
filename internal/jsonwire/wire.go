@@ -185,8 +185,11 @@ func UnmarshalRequest(data []byte) (*clermreq.Request, error) {
 		if err != nil {
 			return nil, err
 		}
-		request.CapabilityRaw, err = capability.Encode(token)
+		encoded, err := capability.Encode(token)
 		if err != nil {
+			return nil, err
+		}
+		if err := request.SetCapabilityRaw(encoded); err != nil {
 			return nil, err
 		}
 	}

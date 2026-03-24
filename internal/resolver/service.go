@@ -34,6 +34,8 @@ type Command struct {
 	Capability        any            `json:"capability,omitempty"`
 }
 
+// Invocation is created per request and must not be pooled.
+// decodeOnce cannot be safely reset for reuse.
 type Invocation struct {
 	Schema            string
 	SchemaFingerprint string
@@ -48,6 +50,12 @@ type Invocation struct {
 	decodedArguments  map[string]any
 	decodeOnce        sync.Once
 	decodeErr         error
+}
+
+// ArgumentsView exposes decoded invocation arguments as a read-only view.
+// Nested values returned by Lookup should also be treated as read-only.
+type ArgumentsView struct {
+	values map[string]any
 }
 
 type Result struct {
@@ -69,19 +77,46 @@ type Service struct {
 	now                func() time.Time
 	skew               time.Duration
 	maxBodyBytes       int64
+	handlerMu          sync.Mutex
 	handlers           atomic.Value
 }
 
 func LoadConfig(path string) (*Service, error) {
-	data, err := os.ReadFile(path)
+	data, err := readConfigFile(path, maxConfigPayloadBytes)
 	if err != nil {
-		return nil, platform.Wrap(platform.CodeIO, err, "read compiled config")
+		return nil, err
 	}
 	doc, err := clermcfg.Decode(data)
 	if err != nil {
 		return nil, err
 	}
 	return New(doc), nil
+}
+
+func readConfigFile(path string, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		maxBytes = maxConfigPayloadBytes
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, platform.Wrap(platform.CodeIO, err, "read compiled config")
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, platform.Wrap(platform.CodeIO, err, "read compiled config")
+	}
+	if info.Size() > maxBytes {
+		return nil, platform.New(platform.CodeValidation, "compiled config exceeds configured size limit")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, platform.Wrap(platform.CodeIO, err, "read compiled config")
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, platform.New(platform.CodeValidation, "compiled config exceeds configured size limit")
+	}
+	return data, nil
 }
 
 func New(doc *schema.Document) *Service {
@@ -95,13 +130,15 @@ func New(doc *schema.Document) *Service {
 	}
 	service := &Service{
 		document:           doc,
-		fingerprint:        doc.PublicFingerprint(),
+		fingerprint:        schema.CachedPublicFingerprint(doc),
 		methods:            methods,
 		relationConditions: relationConditions,
-		replay:             capability.NewMemoryReplayStore(),
-		now:                time.Now,
-		skew:               30 * time.Second,
-		maxBodyBytes:       1 << 20,
+		// Default replay protection is process-local only. Replace this with a
+		// distributed ReplayStore in multi-process production deployments.
+		replay:       capability.NewMemoryReplayStore(),
+		now:          time.Now,
+		skew:         30 * time.Second,
+		maxBodyBytes: 1 << 20,
 	}
 	service.handlers.Store(map[string]HandlerFunc{})
 	return service
@@ -109,6 +146,13 @@ func New(doc *schema.Document) *Service {
 
 func (s *Service) Document() *schema.Document {
 	return s.document
+}
+
+func (s *Service) Fingerprint() [32]byte {
+	if s == nil {
+		return [32]byte{}
+	}
+	return s.fingerprint
 }
 
 func (s *Service) SetCapabilityKeyring(keyring *capability.Keyring) {
@@ -138,6 +182,8 @@ func (s *Service) Bind(methodRef string, handler HandlerFunc) error {
 	if _, ok := s.methods[methodRef]; !ok {
 		return platform.New(platform.CodeNotFound, "method not found in compiled config")
 	}
+	s.handlerMu.Lock()
+	defer s.handlerMu.Unlock()
 	current := s.handlerMap()
 	next := make(map[string]HandlerFunc, len(current)+1)
 	for key, value := range current {
@@ -150,6 +196,8 @@ func (s *Service) Bind(methodRef string, handler HandlerFunc) error {
 
 func (s *Service) Unbind(methodRef string) {
 	methodRef = strings.TrimSpace(methodRef)
+	s.handlerMu.Lock()
+	defer s.handlerMu.Unlock()
 	current := s.handlerMap()
 	if _, ok := current[methodRef]; !ok {
 		return
@@ -266,9 +314,9 @@ func (i *Invocation) Command() *Command {
 	if i == nil {
 		return nil
 	}
-	arguments, err := i.ArgumentsMap()
+	arguments, err := i.Arguments()
 	if err != nil {
-		arguments = nil
+		arguments = ArgumentsView{}
 	}
 	var capabilityView any
 	if i.Capability != nil {
@@ -283,12 +331,28 @@ func (i *Invocation) Command() *Command {
 		Condition:         i.Condition,
 		Execution:         i.Execution,
 		OutputFormat:      i.OutputFormat,
-		Arguments:         arguments,
+		Arguments:         arguments.Clone(),
 		Capability:        capabilityView,
 	}
 }
 
+func (i *Invocation) Arguments() (ArgumentsView, error) {
+	decoded, err := i.decodedArgumentMap()
+	if err != nil {
+		return ArgumentsView{}, err
+	}
+	return ArgumentsView{values: decoded}, nil
+}
+
 func (i *Invocation) ArgumentsMap() (map[string]any, error) {
+	view, err := i.Arguments()
+	if err != nil {
+		return nil, err
+	}
+	return view.Clone(), nil
+}
+
+func (i *Invocation) decodedArgumentMap() (map[string]any, error) {
 	if i == nil {
 		return nil, platform.New(platform.CodeInvalidArgument, "resolver invocation is required")
 	}
@@ -307,16 +371,37 @@ func (i *Invocation) ArgumentsMap() (map[string]any, error) {
 	if i.decodeErr != nil {
 		return nil, i.decodeErr
 	}
-	return cloneArguments(i.decodedArguments), nil
+	return i.decodedArguments, nil
 }
 
 func (i *Invocation) Argument(name string) (any, bool, error) {
-	values, err := i.ArgumentsMap()
+	values, err := i.Arguments()
 	if err != nil {
 		return nil, false, err
 	}
-	value, ok := values[strings.TrimSpace(name)]
+	value, ok := values.Lookup(name)
 	return value, ok, nil
+}
+
+func (v ArgumentsView) Len() int {
+	return len(v.values)
+}
+
+func (v ArgumentsView) Lookup(name string) (any, bool) {
+	value, ok := v.values[strings.TrimSpace(name)]
+	return value, ok
+}
+
+func (v ArgumentsView) Clone() map[string]any {
+	return cloneArguments(v.values)
+}
+
+func (v ArgumentsView) Range(yield func(string, any) bool) {
+	for key, value := range v.values {
+		if !yield(key, value) {
+			return
+		}
+	}
 }
 
 func (i *Invocation) RawArgument(name string) (json.RawMessage, schema.ArgType, bool) {
@@ -377,11 +462,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	response, execErr := s.ExecuteInvocation(r.Context(), invocation)
 	if execErr != nil {
-		response, err = clermresp.BuildError(invocation.Method, string(platform.CodeOf(execErr)), errorMessage(execErr))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		response = buildExecutionErrorResponse(invocation, execErr)
 		w.Header().Set("Clerm-Error-Code", string(platform.CodeOf(execErr)))
 	}
 	w.Header().Set("Content-Type", "application/clerm")
@@ -395,6 +476,8 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) readPayload(body io.ReadCloser) ([]byte, error) {
 	defer body.Close()
+	// Read one byte past the configured limit so oversize payloads can be
+	// rejected deterministically without trusting Content-Length.
 	reader := io.LimitReader(body, s.maxBodyBytes+1)
 	payload, err := io.ReadAll(reader)
 	if err != nil {
@@ -475,6 +558,26 @@ func cloneArguments(values map[string]any) map[string]any {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func buildExecutionErrorResponse(invocation *Invocation, execErr error) *clermresp.Response {
+	method := ""
+	if invocation != nil {
+		method = strings.TrimSpace(invocation.Method.Reference.Raw)
+	}
+	response, err := clermresp.BuildError(schema.Method{
+		Reference: schema.ServiceRef{Raw: method},
+	}, string(platform.CodeOf(execErr)), errorMessage(execErr))
+	if err == nil {
+		return response
+	}
+	return &clermresp.Response{
+		Method: method,
+		Error: clermresp.ErrorBody{
+			Code:    string(platform.CodeOf(execErr)),
+			Message: errorMessage(execErr),
+		},
+	}
 }
 
 func httpStatus(err error) int {

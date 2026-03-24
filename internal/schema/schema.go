@@ -4,8 +4,10 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/million-in/clerm/internal/platform"
 )
@@ -167,12 +169,19 @@ func ParseServiceRef(raw string) (ServiceRef, error) {
 	if !strings.HasPrefix(value, "@") {
 		return ServiceRef{}, platform.New(platform.CodeValidation, "service reference must start with @")
 	}
-	firstDot := strings.IndexByte(value, '.')
-	lastDot := strings.LastIndexByte(value, '.')
-	if firstDot <= 1 || lastDot <= firstDot {
-		return ServiceRef{}, platform.New(platform.CodeValidation, "service reference must include relation, service, method, and version")
+	firstDot := -1
+	secondLastDot := -1
+	lastDot := -1
+	for i := 1; i < len(value); i++ {
+		if value[i] != '.' {
+			continue
+		}
+		if firstDot == -1 {
+			firstDot = i
+		}
+		secondLastDot = lastDot
+		lastDot = i
 	}
-	secondLastDot := strings.LastIndexByte(value[:lastDot], '.')
 	if secondLastDot <= firstDot {
 		return ServiceRef{}, platform.New(platform.CodeValidation, "service reference must include relation, service, method, and version")
 	}
@@ -234,6 +243,49 @@ type Document struct {
 	Relations     []RelationRule `json:"relations"`
 }
 
+type FingerprintCache struct {
+	values sync.Map
+}
+
+func NewFingerprintCache() *FingerprintCache {
+	return &FingerprintCache{}
+}
+
+func (c *FingerprintCache) Public(doc *Document) [32]byte {
+	if doc == nil {
+		return [32]byte{}
+	}
+	if c == nil {
+		return computePublicFingerprint(doc)
+	}
+	if cached, ok := c.values.Load(doc); ok {
+		return cached.([32]byte)
+	}
+	sum := computePublicFingerprint(doc)
+	actual, _ := c.values.LoadOrStore(doc, sum)
+	return actual.([32]byte)
+}
+
+func (c *FingerprintCache) Invalidate(doc *Document) {
+	if c == nil || doc == nil {
+		return
+	}
+	c.values.Delete(doc)
+}
+
+var defaultFingerprintCache = NewFingerprintCache()
+
+// CachedPublicFingerprint returns a cached fingerprint for documents that are
+// treated as read-only after construction. If the caller mutates the document,
+// it must invalidate the cache entry explicitly before reusing it.
+func CachedPublicFingerprint(doc *Document) [32]byte {
+	return defaultFingerprintCache.Public(doc)
+}
+
+func InvalidateCachedPublicFingerprint(doc *Document) {
+	defaultFingerprintCache.Invalidate(doc)
+}
+
 func (d *Document) Validate() error {
 	if d == nil {
 		return platform.New(platform.CodeInvalidArgument, "document is required")
@@ -256,23 +308,25 @@ func (d *Document) Validate() error {
 	if err := validateMetadata(d.Metadata); err != nil {
 		return err
 	}
+	serviceSet := make(map[string]struct{}, len(d.Services))
+	methodSet := make(map[string]struct{}, len(d.Methods))
+	relationSet := make(map[string]struct{}, len(d.Relations))
 
-	for i, service := range d.Services {
+	for _, service := range d.Services {
 		if err := validateServiceRef(service); err != nil {
 			return platform.Wrap(platform.CodeValidation, err, "invalid service declaration")
 		}
-		for j := 0; j < i; j++ {
-			if d.Services[j].Raw == service.Raw {
-				return platform.New(platform.CodeValidation, fmt.Sprintf("duplicate service declaration %s", service.Raw))
-			}
+		if _, exists := serviceSet[service.Raw]; exists {
+			return platform.New(platform.CodeValidation, fmt.Sprintf("duplicate service declaration %s", service.Raw))
 		}
+		serviceSet[service.Raw] = struct{}{}
 	}
 
-	for i, method := range d.Methods {
+	for _, method := range d.Methods {
 		if err := validateServiceRef(method.Reference); err != nil {
 			return platform.Wrap(platform.CodeValidation, err, "invalid method declaration")
 		}
-		if !containsService(d.Services, method.Reference.Raw) {
+		if _, ok := serviceSet[method.Reference.Raw]; !ok {
 			return platform.New(
 				platform.CodeValidation,
 				fmt.Sprintf(
@@ -283,11 +337,10 @@ func (d *Document) Validate() error {
 				),
 			)
 		}
-		for j := 0; j < i; j++ {
-			if d.Methods[j].Reference.Raw == method.Reference.Raw {
-				return platform.New(platform.CodeValidation, fmt.Sprintf("duplicate method declaration %s", method.Reference.Raw))
-			}
+		if _, exists := methodSet[method.Reference.Raw]; exists {
+			return platform.New(platform.CodeValidation, fmt.Sprintf("duplicate method declaration %s", method.Reference.Raw))
 		}
+		methodSet[method.Reference.Raw] = struct{}{}
 		if method.Execution == ExecutionUnknown {
 			return platform.New(platform.CodeValidation, fmt.Sprintf("method %s must declare a valid @exec", method.Reference.Raw))
 		}
@@ -314,32 +367,35 @@ func (d *Document) Validate() error {
 		}
 	}
 
-	for i, relation := range d.Relations {
+	for _, relation := range d.Relations {
 		name := strings.TrimSpace(relation.Name)
 		condition := strings.TrimSpace(relation.Condition)
 		if name == "" || condition == "" {
 			return platform.New(platform.CodeValidation, "relation rules must include a name and condition")
 		}
-		for j := 0; j < i; j++ {
-			if d.Relations[j].Name == name {
-				return platform.New(platform.CodeValidation, fmt.Sprintf("duplicate relation rule %s", name))
-			}
+		if _, exists := relationSet[name]; exists {
+			return platform.New(platform.CodeValidation, fmt.Sprintf("duplicate relation rule %s", name))
 		}
+		relationSet[name] = struct{}{}
 	}
 
-	var missing []string
+	missingSet := make(map[string]struct{})
 	for _, service := range d.Services {
-		if !containsRelation(d.Relations, service.Relation) && !containsString(missing, service.Relation) {
-			missing = append(missing, service.Relation)
+		if _, ok := relationSet[service.Relation]; !ok {
+			missingSet[service.Relation] = struct{}{}
 		}
 	}
 	for _, method := range d.Methods {
 		relation := method.Reference.Relation
-		if !containsRelation(d.Relations, relation) && !containsString(missing, relation) {
-			missing = append(missing, relation)
+		if _, ok := relationSet[relation]; !ok {
+			missingSet[relation] = struct{}{}
 		}
 	}
-	if len(missing) > 0 {
+	if len(missingSet) > 0 {
+		missing := make([]string, 0, len(missingSet))
+		for relation := range missingSet {
+			missing = append(missing, relation)
+		}
 		sort.Strings(missing)
 		return platform.New(platform.CodeValidation, fmt.Sprintf("every used relation type must be defined in relations: %s", strings.Join(missing, ", ")))
 	}
@@ -366,23 +422,8 @@ func validateRoute(raw string) error {
 		}
 		return nil
 	default:
-		schemeEnd := strings.Index(value, "://")
-		if schemeEnd <= 0 {
-			return platform.New(platform.CodeValidation, "route must be an absolute URL or env reference")
-		}
-		hostStart := schemeEnd + 3
-		if hostStart >= len(value) {
-			return platform.New(platform.CodeValidation, "route must be an absolute URL or env reference")
-		}
-		hostEnd := len(value)
-		for i := hostStart; i < len(value); i++ {
-			switch value[i] {
-			case '/', '?', '#':
-				hostEnd = i
-				i = len(value)
-			}
-		}
-		if hostEnd <= hostStart {
+		parsed, err := url.Parse(value)
+		if err != nil || !parsed.IsAbs() || strings.TrimSpace(parsed.Scheme) == "" || strings.TrimSpace(parsed.Host) == "" {
 			return platform.New(platform.CodeValidation, "route must be an absolute URL or env reference")
 		}
 		return nil
@@ -411,6 +452,10 @@ func (d *Document) RelationCondition(name string) (string, bool) {
 }
 
 func (d *Document) PublicFingerprint() [32]byte {
+	return computePublicFingerprint(d)
+}
+
+func computePublicFingerprint(d *Document) [32]byte {
 	sum := sha256.New()
 	writeHashString(sum, d.Name)
 	writeHashString(sum, d.RelationsName)
@@ -496,15 +541,6 @@ func validateServiceRef(ref ServiceRef) error {
 	return nil
 }
 
-func containsService(services []ServiceRef, raw string) bool {
-	for _, service := range services {
-		if service.Raw == raw {
-			return true
-		}
-	}
-	return false
-}
-
 func declaredServices(services []ServiceRef) []string {
 	if len(services) == 0 {
 		return []string{"none"}
@@ -515,24 +551,6 @@ func declaredServices(services []ServiceRef) []string {
 	}
 	sort.Strings(values)
 	return values
-}
-
-func containsRelation(relations []RelationRule, name string) bool {
-	for _, relation := range relations {
-		if relation.Name == name {
-			return true
-		}
-	}
-	return false
-}
-
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }
 
 func writeHashParameters(sum interface{ Write([]byte) (int, error) }, params []Parameter) {

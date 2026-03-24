@@ -124,6 +124,48 @@ func BenchmarkResolveInvocation(b *testing.B) {
 	}
 }
 
+func BenchmarkInvocationArgumentsAccess(b *testing.B) {
+	service := resolver.New(benchmarkDocument(b))
+	for _, benchCase := range benchmarkCases(b) {
+		benchCase := benchCase
+		b.Run(benchCase.name+"/map", func(b *testing.B) {
+			invocation, err := service.ResolveInvocationWithTarget(benchCase.payload, "internal.search")
+			if err != nil {
+				b.Fatalf("ResolveInvocationWithTarget() error = %v", err)
+			}
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				values, err := invocation.ArgumentsMap()
+				if err != nil {
+					b.Fatalf("ArgumentsMap() error = %v", err)
+				}
+				if values["query"] != "shoes" {
+					b.Fatalf("unexpected query: %#v", values["query"])
+				}
+			}
+		})
+		b.Run(benchCase.name+"/view", func(b *testing.B) {
+			invocation, err := service.ResolveInvocationWithTarget(benchCase.payload, "internal.search")
+			if err != nil {
+				b.Fatalf("ResolveInvocationWithTarget() error = %v", err)
+			}
+			if _, err := invocation.Arguments(); err != nil {
+				b.Fatalf("Arguments() warmup error = %v", err)
+			}
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				view, err := invocation.Arguments()
+				if err != nil {
+					b.Fatalf("Arguments() error = %v", err)
+				}
+				if value, ok := view.Lookup("query"); !ok || value != "shoes" {
+					b.Fatalf("unexpected query lookup: (%#v, %t)", value, ok)
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkExecuteBinary(b *testing.B) {
 	service := resolver.New(benchmarkDocument(b))
 	for _, benchCase := range benchmarkCases(b) {

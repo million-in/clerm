@@ -10,7 +10,9 @@ make build-resolver
 ## Run Tests
 
 ```bash
+make vet
 go test ./... -count=1
+make test-race
 make test-unit
 make test-integration
 make test-e2e
@@ -20,6 +22,13 @@ make test-e2e
 
 ```bash
 make bench-resolver
+```
+
+To compare the schema fingerprint cache, the read-only invocation argument
+view, and the ARRAY envelope validation path directly:
+
+```bash
+go test ./tests/bench/schema ./tests/bench/resolver ./tests/bench/clermwire -bench 'Benchmark(PublicFingerprint|CachedPublicFingerprint|InvocationArgumentsAccess|ValidateArrayEnvelope)' -benchmem -run '^$'
 ```
 
 ## Run All Benchmarks

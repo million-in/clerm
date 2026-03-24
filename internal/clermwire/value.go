@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -20,6 +21,12 @@ type Value struct {
 	Raw  json.RawMessage `json:"raw"`
 }
 
+var compactJSONBufferPool = sync.Pool{
+	New: func() any {
+		return &bytes.Buffer{}
+	},
+}
+
 func BuildValues(params []schema.Parameter, payloadJSON []byte, kind string) ([]Value, error) {
 	trimmed := strings.TrimSpace(string(payloadJSON))
 	if trimmed == "" {
@@ -29,16 +36,10 @@ func BuildValues(params []schema.Parameter, payloadJSON []byte, kind string) ([]
 	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
 		return nil, platform.Wrap(platform.CodeParse, err, fmt.Sprintf("parse %s JSON", kind))
 	}
+	paramNames := parameterNameSet(params)
 	unknown := make([]string, 0)
 	for key := range payload {
-		known := false
-		for _, param := range params {
-			if param.Name == key {
-				known = true
-				break
-			}
-		}
-		if !known {
+		if _, ok := paramNames[key]; !ok {
 			unknown = append(unknown, key)
 		}
 	}
@@ -53,11 +54,14 @@ func BuildValues(params []schema.Parameter, payloadJSON []byte, kind string) ([]
 		if !exists {
 			return nil, platform.New(platform.CodeValidation, fmt.Sprintf("missing required %s %s", kind, param.Name))
 		}
-		compact := bytes.Buffer{}
-		if err := json.Compact(&compact, raw); err != nil {
+		compact := compactJSONBufferPool.Get().(*bytes.Buffer)
+		compact.Reset()
+		if err := json.Compact(compact, raw); err != nil {
+			compactJSONBufferPool.Put(compact)
 			return nil, platform.Wrap(platform.CodeValidation, err, fmt.Sprintf("invalid JSON for %s", param.Name))
 		}
 		normalized := json.RawMessage(append([]byte(nil), compact.Bytes()...))
+		compactJSONBufferPool.Put(compact)
 		if err := ValidateValue(param.Type, normalized); err != nil {
 			return nil, platform.Wrap(platform.CodeValidation, err, fmt.Sprintf("invalid value for %s", param.Name))
 		}
@@ -70,16 +74,10 @@ func BuildValuesFromMap(params []schema.Parameter, payload map[string]any, kind 
 	if payload == nil {
 		payload = map[string]any{}
 	}
+	paramNames := parameterNameSet(params)
 	unknown := make([]string, 0)
 	for key := range payload {
-		known := false
-		for _, param := range params {
-			if param.Name == key {
-				known = true
-				break
-			}
-		}
-		if !known {
+		if _, ok := paramNames[key]; !ok {
 			unknown = append(unknown, key)
 		}
 	}
@@ -161,8 +159,8 @@ func ValidateValue(argType schema.ArgType, raw json.RawMessage) error {
 		}
 		return nil
 	case schema.ArgArray:
-		if raw[0] != '[' || raw[len(raw)-1] != ']' || !json.Valid(raw) {
-			return platform.New(platform.CodeValidation, "ARRAY values must be valid JSON arrays")
+		if !hasJSONArrayEnvelope(raw) {
+			return platform.New(platform.CodeValidation, "ARRAY values must use JSON array framing")
 		}
 		return nil
 	case schema.ArgTimestamp:
@@ -227,6 +225,18 @@ func ValuesFromRequestArguments(args []struct {
 		values[i] = Value{Name: arg.Name, Type: arg.Type, Raw: arg.Raw}
 	}
 	return values
+}
+
+func parameterNameSet(params []schema.Parameter) map[string]struct{} {
+	names := make(map[string]struct{}, len(params))
+	for _, param := range params {
+		names[param.Name] = struct{}{}
+	}
+	return names
+}
+
+func hasJSONArrayEnvelope(raw []byte) bool {
+	return len(raw) >= 2 && raw[0] == '[' && raw[len(raw)-1] == ']'
 }
 
 func looksLikeUUID(value string) bool {

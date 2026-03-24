@@ -87,7 +87,9 @@ The hot path avoids:
 The runtime uses:
 
 - immutable method table
+- cached schema fingerprint on the loaded service
 - copy-on-write handler bindings
 - compact request decode
 - compact response encode
+- read-only decoded argument views for handler lookups
 - content-type based interception instead of path-based routing

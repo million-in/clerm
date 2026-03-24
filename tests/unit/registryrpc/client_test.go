@@ -47,6 +47,55 @@ func TestRegisterSendsCompiledPayload(t *testing.T) {
 	}
 }
 
+func TestNewRejectsMissingBaseURL(t *testing.T) {
+	t.Parallel()
+
+	_, err := registryrpc.New("   ", nil)
+	if err == nil || !platform.IsCode(err, platform.CodeInvalidArgument) {
+		t.Fatalf("expected invalid base URL error, got %v", err)
+	}
+}
+
+func TestSearchSendsJSONRequest(t *testing.T) {
+	t.Parallel()
+
+	client, err := registryrpc.New("http://registry.local", &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if got := r.Header.Get("Clerm-Target"); got != "registry.search" {
+			t.Fatalf("unexpected Clerm-Target: %s", got)
+		}
+		if got := strings.TrimSpace(r.Header.Get("Content-Type")); got != "application/json" {
+			t.Fatalf("unexpected Content-Type: %s", got)
+		}
+		body, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			t.Fatalf("ReadAll() error = %v", readErr)
+		}
+		if !strings.Contains(string(body), `"consumer_id":"buyer-1"`) {
+			t.Fatalf("unexpected request body: %s", string(body))
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"results":[{"fingerprint":"fp-1","schema_name":"books","owner_id":"seller-1","status":"active","relations":[{"name":"@global","condition":"any.protected","token_required":false}],"methods":[{"reference":"@global.books.search_books.v1","relation":"@global","condition":"any.protected","execution":"sync","input_count":1,"output_count":1,"output_format":"json"}],"metadata":{"display_name":"Books"}}]}`)),
+		}, nil
+	})})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	output, err := client.Search(context.Background(), registryrpc.SearchInput{
+		ConsumerID: "buyer-1",
+		Query:      "books",
+		Relations:  []string{"@global"},
+	})
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(output.Results) != 1 {
+		t.Fatalf("unexpected search output: %#v", output)
+	}
+}
+
 func TestInvokeReturnsUpstreamResponse(t *testing.T) {
 	t.Parallel()
 

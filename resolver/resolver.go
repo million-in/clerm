@@ -11,6 +11,7 @@ import (
 
 type Command = internal.Command
 type Invocation = internal.Invocation
+type ArgumentsView = internal.ArgumentsView
 type Result = internal.Result
 type HandlerFunc = internal.HandlerFunc
 type Service = internal.Service
