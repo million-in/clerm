@@ -3,7 +3,7 @@ GOMODCACHE ?= $(CURDIR)/.cache/go-mod
 GO_ENV := mkdir -p $(GOCACHE) $(GOMODCACHE) && env GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE)
 GO_BENCH_ENV := mkdir -p $(GOCACHE) $(GOMODCACHE) .bench && env GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE)
 
-.PHONY: build build-resolver test-unit test-integration test-e2e test bench bench-resolver bench-split bench-escape bench-profile clean
+.PHONY: build build-resolver vet test-unit test-integration test-e2e test-race test bench bench-resolver bench-split bench-escape bench-profile clean
 
 build:
 	mkdir -p bin
@@ -12,6 +12,9 @@ build:
 build-resolver:
 	mkdir -p bin
 	$(GO_ENV) go build -o bin/clerm-resolver ./cmd/clerm-resolver
+
+vet:
+	$(GO_ENV) go vet ./...
 
 test-unit:
 	$(GO_ENV) go test ./tests/unit/... -count=1
@@ -22,8 +25,11 @@ test-integration:
 test-e2e:
 	$(GO_ENV) go test ./tests/e2e -count=1
 
+test-race:
+	$(GO_ENV) go test -race ./tests/... -count=1
+
 bench:
-	$(GO_BENCH_ENV) go test ./tests/bench/clermcfg ./tests/bench/clermreq ./tests/bench/resolver -bench . -benchmem -run '^$$'
+	$(GO_BENCH_ENV) go test ./tests/bench/clermcfg ./tests/bench/clermreq ./tests/bench/clermwire ./tests/bench/resolver ./tests/bench/schema -bench . -benchmem -run '^$$'
 
 bench-resolver:
 	$(GO_BENCH_ENV) go test ./tests/bench/resolver -bench . -benchmem -run '^$$'

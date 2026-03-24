@@ -128,6 +128,33 @@ relations @general.mandene
 	}
 }
 
+func TestParseAcceptsIPv6Route(t *testing.T) {
+	source := `
+schema @general.avail.mandene
+  @route: https://[2001:db8::1]:8443/clerm
+  service: @global.healthcare.search_providers.v1
+
+method @global.healthcare.search_providers.v1
+  @exec: sync
+  @args_input: 1
+    decl_args: specialty.STRING
+  @args_output: 1
+    decl_args: providers.ARRAY
+    decl_format: json
+
+relations @general.mandene
+  @global: any.protected
+`
+
+	doc, err := schema.Parse(strings.NewReader(source))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if doc.Route != "https://[2001:db8::1]:8443/clerm" {
+		t.Fatalf("unexpected route: %s", doc.Route)
+	}
+}
+
 func TestParseShowsOffendingSourceLine(t *testing.T) {
 	source := `
 schema @general.avail.mandene

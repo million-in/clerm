@@ -19,12 +19,24 @@ const maxConfigPayloadBytes int64 = 8 << 20
 
 var lookupIPAddr = net.DefaultResolver.LookupIPAddr
 
+var blockedIPNetworks = mustParseCIDRs(
+	"0.0.0.0/8",
+	"100.64.0.0/10",
+	"192.0.2.0/24",
+	"198.18.0.0/15",
+	"198.51.100.0/24",
+	"203.0.113.0/24",
+	"240.0.0.0/4",
+	"2001:db8::/32",
+)
+
 type URLPolicy func(context.Context, *url.URL) error
 
 type LoadConfigURLOptions struct {
 	HTTPClient      *http.Client
 	URLPolicy       URLPolicy
 	MaxPayloadBytes int64
+	LookupIPAddr    func(context.Context, string) ([]net.IPAddr, error)
 }
 
 func LoadConfigURL(ctx context.Context, rawURL string, httpClient *http.Client) (*Service, error) {
@@ -49,16 +61,11 @@ func LoadConfigURLWithOptions(ctx context.Context, rawURL string, options LoadCo
 	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
 		return nil, platform.New(platform.CodeInvalidArgument, "schema URL must use http or https")
 	}
-	if options.URLPolicy != nil {
-		if err := options.URLPolicy(ctx, parsed); err != nil {
-			return nil, err
-		}
-	}
 	httpClient := options.HTTPClient
 	if httpClient == nil {
 		httpClient = defaultHTTPClient()
 	}
-	httpClient = clientWithURLPolicy(httpClient, options.URLPolicy)
+	httpClient = clientWithURLPolicy(httpClient, options.URLPolicy, resolveLookupIPAddr(options.LookupIPAddr))
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, trimmed, nil)
 	if err != nil {
 		return nil, platform.Wrap(platform.CodeInternal, err, "create schema request")
@@ -98,7 +105,7 @@ func defaultHTTPClient() *http.Client {
 	})
 }
 
-func clientWithURLPolicy(httpClient *http.Client, policy URLPolicy) *http.Client {
+func clientWithURLPolicy(httpClient *http.Client, policy URLPolicy, lookup func(context.Context, string) ([]net.IPAddr, error)) *http.Client {
 	if policy == nil {
 		return httpClient
 	}
@@ -114,8 +121,15 @@ func clientWithURLPolicy(httpClient *http.Client, policy URLPolicy) *http.Client
 		}
 		return policy(req.Context(), req.URL)
 	}
-	cloned.Transport = roundTripperWithPinnedResolution(cloned.Transport)
+	cloned.Transport = roundTripperWithURLPolicy(cloned.Transport, policy, lookup)
 	return &cloned
+}
+
+func resolveLookupIPAddr(lookup func(context.Context, string) ([]net.IPAddr, error)) func(context.Context, string) ([]net.IPAddr, error) {
+	if lookup != nil {
+		return lookup
+	}
+	return lookupIPAddr
 }
 
 func readConfigPayload(response *http.Response, maxPayloadBytes int64) ([]byte, error) {
@@ -135,6 +149,9 @@ func readConfigPayload(response *http.Response, maxPayloadBytes int64) ([]byte, 
 	return payload, nil
 }
 
+// DenyPrivateHostPolicy rejects localhost-style hosts and blocked literal IPs.
+// When used with LoadConfigURLWithOptions, resolved addresses are validated
+// on the wrapped transport using the same resolution that is pinned for dialing.
 func DenyPrivateHostPolicy(ctx context.Context, rawURL *url.URL) error {
 	host := strings.ToLower(strings.TrimSpace(rawURL.Hostname()))
 	switch {
@@ -150,15 +167,8 @@ func DenyPrivateHostPolicy(ctx context.Context, rawURL *url.URL) error {
 		}
 		return nil
 	}
-	addresses, err := lookupIPAddr(ctx, host)
-	if err != nil {
-		return platform.Wrap(platform.CodeIO, err, "resolve schema URL host")
-	}
-	if len(addresses) == 0 {
-		return platform.New(platform.CodeIO, "schema URL host could not be resolved")
-	}
-	for _, address := range addresses {
-		if isBlockedIP(address.IP) {
+	for _, address := range resolvedIPsFromContext(ctx) {
+		if isBlockedIP(address) {
 			return platform.New(platform.CodeInvalidArgument, "schema URL host is not allowed")
 		}
 	}
@@ -169,15 +179,28 @@ func isBlockedIP(ip net.IP) bool {
 	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
 		return true
 	}
-	return ip.IsGlobalUnicast() && inCIDR(ip, "100.64.0.0/10")
+	return containsBlockedIP(ip)
 }
 
-func inCIDR(ip net.IP, cidr string) bool {
-	_, network, err := net.ParseCIDR(cidr)
-	if err != nil {
-		return false
+func containsBlockedIP(ip net.IP) bool {
+	for _, network := range blockedIPNetworks {
+		if network.Contains(ip) {
+			return true
+		}
 	}
-	return network.Contains(ip)
+	return false
+}
+
+func mustParseCIDRs(cidrs ...string) []*net.IPNet {
+	networks := make([]*net.IPNet, 0, len(cidrs))
+	for _, cidr := range cidrs {
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			panic(err)
+		}
+		networks = append(networks, network)
+	}
+	return networks
 }
 
 type pinnedResolution struct {
@@ -187,32 +210,44 @@ type pinnedResolution struct {
 }
 
 type pinnedResolutionContextKey struct{}
+type resolvedIPsContextKey struct{}
 
-type pinnedResolutionRoundTripper struct {
+type urlPolicyRoundTripper struct {
 	base      http.RoundTripper
+	policy    URLPolicy
+	lookup    func(context.Context, string) ([]net.IPAddr, error)
 	enablePin bool
 }
 
-func roundTripperWithPinnedResolution(base http.RoundTripper) http.RoundTripper {
+func roundTripperWithURLPolicy(base http.RoundTripper, policy URLPolicy, lookup func(context.Context, string) ([]net.IPAddr, error)) http.RoundTripper {
 	base, supportsPinnedResolution := transportWithPinnedDial(base)
-	if !supportsPinnedResolution {
-		return base
-	}
-	return pinnedResolutionRoundTripper{
+	return urlPolicyRoundTripper{
 		base:      base,
-		enablePin: true,
+		policy:    policy,
+		lookup:    resolveLookupIPAddr(lookup),
+		enablePin: supportsPinnedResolution,
 	}
 }
 
-func (rt pinnedResolutionRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
-	if !rt.enablePin || request == nil || request.URL == nil {
+func (rt urlPolicyRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request == nil || request.URL == nil {
 		return rt.base.RoundTrip(request)
 	}
-	resolution, err := resolvePinnedResolution(request.Context(), request.URL)
-	if err != nil {
-		return nil, platform.Wrap(platform.CodeIO, err, "resolve schema URL host")
+	ctx := request.Context()
+	if rt.enablePin {
+		resolution, err := resolvePinnedResolution(ctx, request.URL, rt.lookup)
+		if err != nil {
+			return nil, platform.Wrap(platform.CodeIO, err, "resolve schema URL host")
+		}
+		ctx = context.WithValue(ctx, pinnedResolutionContextKey{}, resolution)
+		ctx = context.WithValue(ctx, resolvedIPsContextKey{}, append([]net.IP(nil), resolution.ips...))
 	}
-	request = request.Clone(context.WithValue(request.Context(), pinnedResolutionContextKey{}, resolution))
+	request = request.Clone(ctx)
+	if rt.policy != nil {
+		if err := rt.policy(request.Context(), request.URL); err != nil {
+			return nil, err
+		}
+	}
 	return rt.base.RoundTrip(request)
 }
 
@@ -294,7 +329,7 @@ func dialPinnedAddresses(ctx context.Context, network string, resolution pinnedR
 	return nil, errors.New("schema URL host could not be resolved")
 }
 
-func resolvePinnedResolution(ctx context.Context, rawURL *url.URL) (pinnedResolution, error) {
+func resolvePinnedResolution(ctx context.Context, rawURL *url.URL, lookup func(context.Context, string) ([]net.IPAddr, error)) (pinnedResolution, error) {
 	host := strings.TrimSpace(rawURL.Hostname())
 	if host == "" {
 		return pinnedResolution{}, errors.New("schema URL host is required")
@@ -311,7 +346,7 @@ func resolvePinnedResolution(ctx context.Context, rawURL *url.URL) (pinnedResolu
 	if ip := net.ParseIP(host); ip != nil {
 		return pinnedResolution{host: host, port: port, ips: []net.IP{ip}}, nil
 	}
-	addresses, err := lookupIPAddr(ctx, host)
+	addresses, err := resolveLookupIPAddr(lookup)(ctx, host)
 	if err != nil {
 		return pinnedResolution{}, err
 	}
@@ -336,6 +371,14 @@ func pinnedResolutionFromContext(ctx context.Context) (pinnedResolution, bool) {
 	}
 	resolution, ok := ctx.Value(pinnedResolutionContextKey{}).(pinnedResolution)
 	return resolution, ok
+}
+
+func resolvedIPsFromContext(ctx context.Context) []net.IP {
+	if ctx == nil {
+		return nil
+	}
+	addresses, _ := ctx.Value(resolvedIPsContextKey{}).([]net.IP)
+	return addresses
 }
 
 func matchesPinnedAddress(address, host, port string) bool {

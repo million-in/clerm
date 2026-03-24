@@ -161,12 +161,20 @@ clerm token refresh \
 ## Testing
 
 ```bash
+make vet
 go test ./... -count=1
+make test-race
 make bench-resolver
 make bench
 make bench-split
 make bench-escape
 make bench-profile
+```
+
+For targeted microbenchmarks on the latest resolver, schema, and array-validation hot-path changes:
+
+```bash
+go test ./tests/bench/schema ./tests/bench/resolver ./tests/bench/clermwire -bench 'Benchmark(PublicFingerprint|CachedPublicFingerprint|InvocationArgumentsAccess|ValidateArrayEnvelope)' -benchmem -run '^$'
 ```
 
 Resolver docs live in `docs/`.

@@ -175,28 +175,6 @@ func runToken(streams Streams, args []string) error {
 	}
 }
 
-func runTokenKeygen(streams Streams, args []string) error {
-	fs := flag.NewFlagSet("token keygen", flag.ContinueOnError)
-	fs.SetOutput(streams.Stderr)
-	outPrivate := fs.String("out-private", "clerm.ed25519", "path to output Ed25519 private key")
-	outPublic := fs.String("out-public", "clerm.ed25519.pub", "path to output Ed25519 public key")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	publicKey, privateKey, err := capability.GenerateKeyPair()
-	if err != nil {
-		return err
-	}
-	if err := capability.WritePrivateKeyFile(*outPrivate, privateKey); err != nil {
-		return err
-	}
-	if err := capability.WritePublicKeyFile(*outPublic, publicKey); err != nil {
-		return err
-	}
-	_, _ = fmt.Fprintf(streams.Stdout, "%s\n%s\n", *outPrivate, *outPublic)
-	return nil
-}
-
 func runTokenIssue(streams Streams, args []string) error {
 	return runTokenIssueRPC(streams, args)
 }
@@ -281,7 +259,9 @@ func runRequest(streams Streams, args []string) error {
 		if err := validateCapabilityScope(doc, method, condition, token); err != nil {
 			return err
 		}
-		request.CapabilityRaw = encodedToken
+		if err := request.SetCapabilityRaw(encodedToken); err != nil {
+			return err
+		}
 	}
 	encoded, err := clermreq.Encode(request)
 	if err != nil {
@@ -345,7 +325,7 @@ func runServe(logger *slog.Logger, streams Streams, args []string) error {
 	}
 	server := &http.Server{Addr: *listen, Handler: resolver.NewDaemonHandler(logger, service)}
 	if logger != nil {
-		logger.Info("starting clerm resolver daemon", "listen", *listen, "schema", service.Document().Name, "schema_fingerprint", fmt.Sprintf("%x", service.Document().PublicFingerprint()))
+		logger.Info("starting clerm resolver daemon", "listen", *listen, "schema", service.Document().Name, "schema_fingerprint", fmt.Sprintf("%x", service.Fingerprint()))
 	}
 	_, _ = fmt.Fprintf(streams.Stdout, "%s\n", *listen)
 	return server.ListenAndServe()
@@ -408,11 +388,12 @@ type benchmarkTiming struct {
 }
 
 type benchmarkReport struct {
-	Iterations  int             `json:"iterations"`
-	ConfigSize  benchmarkSize   `json:"config_size"`
-	RequestSize benchmarkSize   `json:"request_size"`
-	ConfigTime  benchmarkTiming `json:"config_time"`
-	RequestTime benchmarkTiming `json:"request_time"`
+	Iterations      int             `json:"iterations"`
+	MethodologyNote string          `json:"methodology_note"`
+	ConfigSize      benchmarkSize   `json:"config_size"`
+	RequestSize     benchmarkSize   `json:"request_size"`
+	ConfigTime      benchmarkTiming `json:"config_time"`
+	RequestTime     benchmarkTiming `json:"request_time"`
 }
 
 func runBenchmark(streams Streams, args []string) error {
@@ -462,9 +443,10 @@ func runBenchmark(streams Streams, args []string) error {
 		return err
 	}
 	report := benchmarkReport{
-		Iterations:  *iterations,
-		ConfigSize:  sizeComparison(len(cfgBytes), len(cfgJSON)),
-		RequestSize: sizeComparison(len(reqBytes), len(reqJSON)),
+		Iterations:      *iterations,
+		MethodologyNote: "These CLI loop timings include per-iteration function-call and error-check overhead. Use `go test -bench` for precise microbenchmarks.",
+		ConfigSize:      sizeComparison(len(cfgBytes), len(cfgJSON)),
+		RequestSize:     sizeComparison(len(reqBytes), len(reqJSON)),
 		ConfigTime: benchmarkTiming{
 			CLERMEncodeNS: measureNS(*iterations, func() error { _, err := clermcfg.Encode(doc); return err }),
 			CLERMDecodeNS: measureNS(*iterations, func() error { _, err := clermcfg.Decode(cfgBytes); return err }),
@@ -608,21 +590,46 @@ func inspectPath(path string, internal bool) (any, error) {
 
 func inspectableDocument(doc *schema.Document, internal bool) any {
 	if !internal {
-		return doc
+		return buildInspectableDocumentPublic(doc)
 	}
-	return struct {
-		Name          string                `json:"name"`
-		RelationsName string                `json:"relations_name"`
-		Metadata      schema.Metadata       `json:"metadata,omitempty"`
-		Route         string                `json:"route"`
-		Services      []schema.ServiceRef   `json:"services"`
-		Methods       []schema.Method       `json:"methods"`
-		Relations     []schema.RelationRule `json:"relations"`
-	}{
+	return inspectableDocumentInternal{
 		Name:          doc.Name,
 		RelationsName: doc.RelationsName,
 		Metadata:      doc.Metadata,
 		Route:         doc.Route,
+		Services:      doc.Services,
+		Methods:       doc.Methods,
+		Relations:     doc.Relations,
+	}
+}
+
+type inspectableDocumentPublic struct {
+	Name          string                `json:"name"`
+	RelationsName string                `json:"relations_name"`
+	Metadata      schema.Metadata       `json:"metadata,omitempty"`
+	Services      []schema.ServiceRef   `json:"services"`
+	Methods       []schema.Method       `json:"methods"`
+	Relations     []schema.RelationRule `json:"relations"`
+}
+
+type inspectableDocumentInternal struct {
+	Name          string                `json:"name"`
+	RelationsName string                `json:"relations_name"`
+	Metadata      schema.Metadata       `json:"metadata,omitempty"`
+	Route         string                `json:"route"`
+	Services      []schema.ServiceRef   `json:"services"`
+	Methods       []schema.Method       `json:"methods"`
+	Relations     []schema.RelationRule `json:"relations"`
+}
+
+func buildInspectableDocumentPublic(doc *schema.Document) inspectableDocumentPublic {
+	if doc == nil {
+		return inspectableDocumentPublic{}
+	}
+	return inspectableDocumentPublic{
+		Name:          doc.Name,
+		RelationsName: doc.RelationsName,
+		Metadata:      doc.Metadata,
 		Services:      doc.Services,
 		Methods:       doc.Methods,
 		Relations:     doc.Relations,
@@ -731,7 +738,7 @@ func validateCapabilityScope(doc *schema.Document, method schema.Method, conditi
 	if token.Schema != doc.Name {
 		return platform.New(platform.CodeValidation, "capability token schema does not match request schema")
 	}
-	if token.SchemaHash != doc.PublicFingerprint() {
+	if token.SchemaHash != schema.CachedPublicFingerprint(doc) {
 		return platform.New(platform.CodeValidation, "capability token schema fingerprint does not match request schema")
 	}
 	if token.Condition != condition {

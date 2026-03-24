@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/million-in/clerm/internal/app/clermcli"
 	"github.com/million-in/clerm/platform"
@@ -310,6 +311,59 @@ func TestRunInvokeRejectsLargeInlineBody(t *testing.T) {
 	})
 	if err == nil || !platform.IsCode(err, platform.CodeValidation) || !strings.Contains(err.Error(), "exceeds inline limit") {
 		t.Fatalf("expected inline limit error, got %v", err)
+	}
+}
+
+func TestRunInvokeUsesRegistryContextFactory(t *testing.T) {
+	tmpDir := t.TempDir()
+	requestPath := filepath.Join(tmpDir, "request.clerm")
+	if err := os.WriteFile(requestPath, []byte("request-payload"), 0o644); err != nil {
+		t.Fatalf("WriteFile(request) error = %v", err)
+	}
+
+	restoreClient := clermcli.SetRegistryClientFactoryForTest(func(string) (clermcli.RegistryClient, error) {
+		return mockRegistryClient{
+			register: func(context.Context, registryrpc.RegisterInput) (*registryrpc.RegisterOutput, error) { return nil, nil },
+			search:   func(context.Context, registryrpc.SearchInput) (*registryrpc.SearchOutput, error) { return nil, nil },
+			discover: func(context.Context, registryrpc.SearchInput) (*registryrpc.SearchOutput, error) { return nil, nil },
+			establishRelationship: func(context.Context, registryrpc.RelationshipInput) (*registryrpc.RelationshipOutput, error) {
+				return nil, nil
+			},
+			relationshipStatus: func(context.Context, registryrpc.RelationshipStatusInput) (*registryrpc.RelationshipStatusOutput, error) {
+				return nil, nil
+			},
+			issueToken: func(context.Context, registryrpc.IssueTokenInput) (*registryrpc.IssueTokenOutput, error) {
+				return nil, nil
+			},
+			refreshToken: func(context.Context, registryrpc.RefreshTokenInput) (*registryrpc.IssueTokenOutput, error) {
+				return nil, nil
+			},
+			invoke: func(ctx context.Context, input registryrpc.InvokeInput) (*registryrpc.InvokeOutput, error) {
+				if input.ProviderFingerprint != "schema-fp" {
+					t.Fatalf("unexpected provider fingerprint: %s", input.ProviderFingerprint)
+				}
+				if ctx.Err() != context.Canceled {
+					t.Fatalf("expected canceled invoke context, got %v", ctx.Err())
+				}
+				return &registryrpc.InvokeOutput{StatusCode: http.StatusNoContent}, nil
+			},
+		}, nil
+	})
+	defer restoreClient()
+
+	restoreContext := clermcli.SetRegistryContextFactoryForTest(func(time.Duration) (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx, func() {}
+	})
+	defer restoreContext()
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	if err := clermcli.RunWithIO(nil, clermcli.Streams{Stdout: stdout, Stderr: stderr}, []string{
+		"invoke", "-registry", "http://registry.local", "-fingerprint", "schema-fp", "-request", requestPath,
+	}); err != nil {
+		t.Fatalf("RunWithIO(invoke) error = %v stderr=%s", err, stderr.String())
 	}
 }
 

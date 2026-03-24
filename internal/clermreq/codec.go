@@ -3,7 +3,6 @@ package clermreq
 import (
 	"bytes"
 	"encoding/json"
-	"unsafe"
 
 	"github.com/million-in/clerm/internal/capability"
 	"github.com/million-in/clerm/internal/clermwire"
@@ -25,9 +24,10 @@ type Argument struct {
 }
 
 type Request struct {
-	Method        string     `json:"method"`
-	Arguments     []Argument `json:"arguments"`
-	CapabilityRaw []byte     `json:"-"`
+	Method                 string     `json:"method"`
+	Arguments              []Argument `json:"arguments"`
+	CapabilityRaw          []byte     `json:"-"`
+	validatedCapabilityRaw []byte
 }
 
 func Magic() [4]byte {
@@ -83,14 +83,30 @@ func (r *Request) AsMap() (map[string]any, error) {
 	return out, nil
 }
 
+// SetCapabilityRaw validates and stores an owned copy of the attached token.
+func (r *Request) SetCapabilityRaw(token []byte) error {
+	if r == nil {
+		return platform.New(platform.CodeInvalidArgument, "request is required")
+	}
+	if len(token) == 0 {
+		r.CapabilityRaw = nil
+		r.validatedCapabilityRaw = nil
+		return nil
+	}
+	if _, err := capability.Decode(token); err != nil {
+		return platform.Wrap(platform.CodeValidation, err, "invalid capability token on request")
+	}
+	r.CapabilityRaw = append(r.CapabilityRaw[:0], token...)
+	r.validatedCapabilityRaw = append(r.validatedCapabilityRaw[:0], r.CapabilityRaw...)
+	return nil
+}
+
 func Encode(request *Request) ([]byte, error) {
 	if request == nil {
 		return nil, platform.New(platform.CodeInvalidArgument, "request is required")
 	}
-	if len(request.CapabilityRaw) > 0 {
-		if _, err := capability.Decode(request.CapabilityRaw); err != nil {
-			return nil, platform.Wrap(platform.CodeValidation, err, "invalid capability token on request")
-		}
+	if err := request.validateCapabilityRaw(); err != nil {
+		return nil, err
 	}
 	buf := make([]byte, 0, encodedSize(request))
 	buf = append(buf, magic[:]...)
@@ -165,6 +181,7 @@ func Decode(data []byte) (*Request, error) {
 				return nil, platform.Wrap(platform.CodeIO, err, "read request capability token")
 			}
 			request.CapabilityRaw = token
+			request.validatedCapabilityRaw = nil
 		}
 	}
 	if dec.remaining() != 0 {
@@ -187,6 +204,24 @@ func encodedSize(request *Request) int {
 		size += 4 + len(request.CapabilityRaw)
 	}
 	return size
+}
+
+func (r *Request) validateCapabilityRaw() error {
+	if r == nil {
+		return platform.New(platform.CodeInvalidArgument, "request is required")
+	}
+	if len(r.CapabilityRaw) == 0 {
+		r.validatedCapabilityRaw = nil
+		return nil
+	}
+	if bytes.Equal(r.CapabilityRaw, r.validatedCapabilityRaw) {
+		return nil
+	}
+	if _, err := capability.Decode(r.CapabilityRaw); err != nil {
+		return platform.Wrap(platform.CodeValidation, err, "invalid capability token on request")
+	}
+	r.validatedCapabilityRaw = append(r.validatedCapabilityRaw[:0], r.CapabilityRaw...)
+	return nil
 }
 
 func appendUint16(dst []byte, value uint16) []byte {
@@ -277,7 +312,7 @@ func (d *decoder) readBytes() (json.RawMessage, error) {
 	if d.off+int(length) > len(d.data) {
 		return nil, platform.New(platform.CodeIO, "unexpected end of input")
 	}
-	value := json.RawMessage(d.data[d.off : d.off+int(length)])
+	value := json.RawMessage(append([]byte(nil), d.data[d.off:d.off+int(length)]...))
 	d.off += int(length)
 	return value, nil
 }
@@ -290,5 +325,5 @@ func bytesToString(value []byte) string {
 	if len(value) == 0 {
 		return ""
 	}
-	return unsafe.String(unsafe.SliceData(value), len(value))
+	return string(value)
 }

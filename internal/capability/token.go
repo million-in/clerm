@@ -62,11 +62,13 @@ type IssueOptions struct {
 	SchemaHash [32]byte
 	Relation   string
 	Condition  string
-	Methods    []string
-	Targets    []string
-	IssuedAt   time.Time
-	NotBefore  time.Time
-	ExpiresAt  time.Time
+	// Methods is sorted and deduplicated before signing.
+	Methods []string
+	// Targets is sorted and deduplicated before signing.
+	Targets   []string
+	IssuedAt  time.Time
+	NotBefore time.Time
+	ExpiresAt time.Time
 }
 
 type Keyring struct {
@@ -218,7 +220,9 @@ func ValidateUnsigned(token *Token) error {
 	return nil
 }
 
-func VerifyTime(token *Token, now time.Time, skew time.Duration) error {
+// AssertTimeWindow checks only the temporal claims on a token.
+// It does not verify the cryptographic signature. Call Keyring.Verify first.
+func AssertTimeWindow(token *Token, now time.Time, skew time.Duration) error {
 	if err := Validate(token); err != nil {
 		return err
 	}
@@ -234,6 +238,12 @@ func VerifyTime(token *Token, now time.Time, skew time.Duration) error {
 		return platform.New(platform.CodeValidation, "capability token has expired")
 	}
 	return nil
+}
+
+// VerifyTime checks only the temporal claims on a token.
+// It does not verify the cryptographic signature. Call Keyring.Verify first.
+func VerifyTime(token *Token, now time.Time, skew time.Duration) error {
+	return AssertTimeWindow(token, now, skew)
 }
 
 func (t *Token) AllowsMethod(method string, relation string) bool {

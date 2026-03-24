@@ -75,6 +75,32 @@ func TestLoadConfigURLRejectsPrivateHostWithPolicy(t *testing.T) {
 	}
 }
 
+func TestDenyPrivateHostPolicyRejectsReservedRanges(t *testing.T) {
+	tests := []string{
+		"http://[::1]/schema.clermcfg",
+		"http://[fe80::1]/schema.clermcfg",
+		"http://0.1.2.3/schema.clermcfg",
+		"http://192.0.2.10/schema.clermcfg",
+		"http://198.18.0.10/schema.clermcfg",
+		"http://203.0.113.10/schema.clermcfg",
+		"http://240.0.0.10/schema.clermcfg",
+		"http://[2001:db8::10]/schema.clermcfg",
+	}
+	for _, rawURL := range tests {
+		rawURL := rawURL
+		t.Run(rawURL, func(t *testing.T) {
+			parsed, err := url.Parse(rawURL)
+			if err != nil {
+				t.Fatalf("Parse(%q) error = %v", rawURL, err)
+			}
+			err = resolver.DenyPrivateHostPolicy(context.Background(), parsed)
+			if err == nil || !strings.Contains(err.Error(), "host is not allowed") {
+				t.Fatalf("expected reserved-host rejection, got %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadConfigURLRejectsBlockedRedirectTarget(t *testing.T) {
 	doc := mustDocument(t)
 	payload, err := clermcfg.Encode(doc)
@@ -196,5 +222,31 @@ func TestLoadConfigURLPinsResolvedIPForTransportDials(t *testing.T) {
 	}
 	if gotHost, _, splitErr := net.SplitHostPort(dialedAddress); splitErr != nil || net.ParseIP(gotHost) == nil {
 		t.Fatalf("expected pinned IP dial address, got %q (err=%v)", dialedAddress, splitErr)
+	}
+}
+
+func TestLoadConfigURLRejectsResolvedPrivateHostBeforeDial(t *testing.T) {
+	dialed := false
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(context.Context, string, string) (net.Conn, error) {
+				dialed = true
+				return nil, errors.New("unexpected dial")
+			},
+		},
+	}
+
+	_, err := resolver.LoadConfigURLWithOptions(context.Background(), "http://public.example/schema/shopify.clermcfg", resolver.LoadConfigURLOptions{
+		HTTPClient: client,
+		URLPolicy:  resolver.DenyPrivateHostPolicy,
+		LookupIPAddr: func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "host is not allowed") {
+		t.Fatalf("expected resolved private-host rejection, got %v", err)
+	}
+	if dialed {
+		t.Fatal("expected URL policy rejection before any dial")
 	}
 }

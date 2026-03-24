@@ -15,6 +15,7 @@ type Method = internal.Method
 type RelationRule = internal.RelationRule
 type Metadata = internal.Metadata
 type Document = internal.Document
+type FingerprintCache = internal.FingerprintCache
 
 const (
 	ExecutionUnknown   = internal.ExecutionUnknown
@@ -35,12 +36,15 @@ const (
 )
 
 var (
-	Parse                   = func(r io.Reader) (*Document, error) { return internal.Parse(r) }
-	ParseExecutionMode      = internal.ParseExecutionMode
-	AvailableExecutionModes = internal.AvailableExecutionModes
-	ParseArgType            = internal.ParseArgType
-	AvailableArgTypes       = internal.AvailableArgTypes
-	ParsePayloadFormat      = internal.ParsePayloadFormat
-	AvailablePayloadFormats = internal.AvailablePayloadFormats
-	ParseServiceRef         = internal.ParseServiceRef
+	Parse                             = func(r io.Reader) (*Document, error) { return internal.Parse(r) }
+	ParseExecutionMode                = internal.ParseExecutionMode
+	AvailableExecutionModes           = internal.AvailableExecutionModes
+	ParseArgType                      = internal.ParseArgType
+	AvailableArgTypes                 = internal.AvailableArgTypes
+	ParsePayloadFormat                = internal.ParsePayloadFormat
+	AvailablePayloadFormats           = internal.AvailablePayloadFormats
+	ParseServiceRef                   = internal.ParseServiceRef
+	NewFingerprintCache               = func() *FingerprintCache { return internal.NewFingerprintCache() }
+	CachedPublicFingerprint           = internal.CachedPublicFingerprint
+	InvalidateCachedPublicFingerprint = internal.InvalidateCachedPublicFingerprint
 )

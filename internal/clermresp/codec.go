@@ -129,17 +129,30 @@ func Encode(response *Response) ([]byte, error) {
 	buf := make([]byte, 0, encodedSize(response))
 	buf = append(buf, magic[:]...)
 	buf = appendUint16(buf, formatVersion)
-	buf = appendString(buf, response.Method)
+	var err error
+	buf, err = appendString(buf, response.Method)
+	if err != nil {
+		return nil, err
+	}
 	if response.Error.Code != "" || response.Error.Message != "" {
 		buf = append(buf, 1)
-		buf = appendString(buf, response.Error.Code)
-		buf = appendString(buf, response.Error.Message)
+		buf, err = appendString(buf, response.Error.Code)
+		if err != nil {
+			return nil, err
+		}
+		buf, err = appendString(buf, response.Error.Message)
+		if err != nil {
+			return nil, err
+		}
 		return buf, nil
 	}
 	buf = append(buf, 0)
 	buf = appendUint16(buf, uint16(len(response.Outputs)))
 	for _, output := range response.Outputs {
-		buf = appendString(buf, output.Name)
+		buf, err = appendString(buf, output.Name)
+		if err != nil {
+			return nil, err
+		}
 		buf = append(buf, byte(output.Type))
 		buf = appendBytes(buf, output.Raw)
 	}
@@ -147,46 +160,12 @@ func Encode(response *Response) ([]byte, error) {
 }
 
 func WriteTo(w io.Writer, response *Response) error {
-	if response == nil {
-		return platform.New(platform.CodeInvalidArgument, "response is required")
+	data, err := Encode(response)
+	if err != nil {
+		return err
 	}
-	if _, err := w.Write(magic[:]); err != nil {
-		return platform.Wrap(platform.CodeIO, err, "write response magic")
-	}
-	if err := writeUint16(w, formatVersion); err != nil {
-		return platform.Wrap(platform.CodeIO, err, "write response version")
-	}
-	if err := writeString(w, response.Method); err != nil {
-		return platform.Wrap(platform.CodeIO, err, "write response method")
-	}
-	if response.Error.Code != "" || response.Error.Message != "" {
-		if err := writeByte(w, 1); err != nil {
-			return platform.Wrap(platform.CodeIO, err, "write response error marker")
-		}
-		if err := writeString(w, response.Error.Code); err != nil {
-			return platform.Wrap(platform.CodeIO, err, "write response error code")
-		}
-		if err := writeString(w, response.Error.Message); err != nil {
-			return platform.Wrap(platform.CodeIO, err, "write response error message")
-		}
-		return nil
-	}
-	if err := writeByte(w, 0); err != nil {
-		return platform.Wrap(platform.CodeIO, err, "write response output marker")
-	}
-	if err := writeUint16(w, uint16(len(response.Outputs))); err != nil {
-		return platform.Wrap(platform.CodeIO, err, "write response output count")
-	}
-	for _, output := range response.Outputs {
-		if err := writeString(w, output.Name); err != nil {
-			return platform.Wrap(platform.CodeIO, err, "write response output name")
-		}
-		if err := writeByte(w, byte(output.Type)); err != nil {
-			return platform.Wrap(platform.CodeIO, err, "write response output type")
-		}
-		if err := writeBytes(w, output.Raw); err != nil {
-			return platform.Wrap(platform.CodeIO, err, "write response output payload")
-		}
+	if _, err := w.Write(data); err != nil {
+		return platform.Wrap(platform.CodeIO, err, "write response payload")
 	}
 	return nil
 }
@@ -277,12 +256,12 @@ func appendUint32(dst []byte, value uint32) []byte {
 	return append(dst, byte(value>>24), byte(value>>16), byte(value>>8), byte(value))
 }
 
-func appendString(dst []byte, value string) []byte {
+func appendString(dst []byte, value string) ([]byte, error) {
 	if len(value) > 0xffff {
-		panic(fmt.Sprintf("response string too large: %d", len(value)))
+		return nil, platform.New(platform.CodeInvalidArgument, fmt.Sprintf("response string too large: %d", len(value)))
 	}
 	dst = appendUint16(dst, uint16(len(value)))
-	return append(dst, value...)
+	return append(dst, value...), nil
 }
 
 func appendBytes(dst []byte, value []byte) []byte {
@@ -397,5 +376,9 @@ func (d *decoder) readBytes() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return d.readFixed(int(length))
+	value, err := d.readFixed(int(length))
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(nil), value...), nil
 }

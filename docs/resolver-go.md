@@ -94,3 +94,29 @@ Each handler returns either:
 - a normal Go error
 
 Go errors become CLERM error responses after method resolution.
+
+## Hot Path Notes
+
+For handlers that only need read access to decoded arguments, prefer the
+read-only view:
+
+```go
+args, err := invocation.Arguments()
+if err != nil {
+    return nil, err
+}
+specialty, _ := args.Lookup("specialty")
+```
+
+`ArgumentsMap()` still exists, but it clones the decoded argument map for
+callers that need a mutable copy.
+
+For repeated schema fingerprint reads on a stable loaded document, prefer the
+external cache API:
+
+```go
+sum := schema.CachedPublicFingerprint(doc)
+```
+
+`doc.PublicFingerprint()` still returns the exact fingerprint of the current
+document state and does not cache internally.

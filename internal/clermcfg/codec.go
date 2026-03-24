@@ -2,7 +2,6 @@ package clermcfg
 
 import (
 	"bytes"
-	"unsafe"
 
 	"github.com/million-in/clerm/internal/platform"
 	"github.com/million-in/clerm/internal/schema"
@@ -42,9 +41,16 @@ func Encode(doc *schema.Document) ([]byte, error) {
 	for _, method := range doc.Methods {
 		buf = appendString(buf, method.Reference.Raw)
 		buf = append(buf, byte(method.Execution))
-		buf = appendCount(buf, method.InputCount)
+		var err error
+		buf, err = appendCount(buf, method.InputCount)
+		if err != nil {
+			return nil, platform.Wrap(platform.CodeValidation, err, "encode input count for "+method.Reference.Raw)
+		}
 		buf = appendParameters(buf, method.InputArgs)
-		buf = appendCount(buf, method.OutputCount)
+		buf, err = appendCount(buf, method.OutputCount)
+		if err != nil {
+			return nil, platform.Wrap(platform.CodeValidation, err, "encode output count for "+method.Reference.Raw)
+		}
 		buf = appendParameters(buf, method.OutputArgs)
 		buf = append(buf, byte(method.OutputFormat))
 	}
@@ -218,39 +224,14 @@ func decodeInto(doc *schema.Document, data []byte) error {
 }
 
 type Decoder struct {
-	doc    schema.Document
-	params []schema.Parameter
+	doc schema.Document
 }
 
 func (d *Decoder) DecodeCodec(data []byte) (*schema.Document, error) {
-	plan, err := scanDecodePlan(data)
-	if err != nil {
+	if err := decodeInto(&d.doc, data); err != nil {
 		return nil, err
 	}
-	if cap(d.doc.Services) < plan.serviceCount {
-		d.doc.Services = make([]schema.ServiceRef, plan.serviceCount)
-	} else {
-		d.doc.Services = d.doc.Services[:plan.serviceCount]
-	}
-	if cap(d.doc.Methods) < plan.methodCount {
-		d.doc.Methods = make([]schema.Method, plan.methodCount)
-	} else {
-		d.doc.Methods = d.doc.Methods[:plan.methodCount]
-	}
-	if cap(d.doc.Relations) < plan.relationCount {
-		d.doc.Relations = make([]schema.RelationRule, plan.relationCount)
-	} else {
-		d.doc.Relations = d.doc.Relations[:plan.relationCount]
-	}
-	if cap(d.params) < plan.parameterCount {
-		d.params = make([]schema.Parameter, plan.parameterCount)
-	} else {
-		d.params = d.params[:plan.parameterCount]
-	}
-	if err := decodeIntoWithPool(&d.doc, d.params, data, plan); err != nil {
-		return nil, err
-	}
-	return &d.doc, nil
+	return cloneDocument(&d.doc), nil
 }
 
 func (d *Decoder) Decode(data []byte) (*schema.Document, error) {
@@ -262,252 +243,6 @@ func (d *Decoder) Decode(data []byte) (*schema.Document, error) {
 		return nil, err
 	}
 	return doc, nil
-}
-
-type decodePlan struct {
-	serviceCount   int
-	methodCount    int
-	relationCount  int
-	parameterCount int
-}
-
-func scanDecodePlan(data []byte) (decodePlan, error) {
-	dec := newDecoder(data)
-	header, err := dec.readFixed(4)
-	if err != nil {
-		return decodePlan{}, platform.Wrap(platform.CodeIO, err, "read config magic")
-	}
-	if !bytes.Equal(header, magic[:]) {
-		return decodePlan{}, platform.New(platform.CodeValidation, "invalid config magic header")
-	}
-	version, err := dec.readUint16()
-	if err != nil {
-		return decodePlan{}, platform.Wrap(platform.CodeIO, err, "read config version")
-	}
-	if version != formatVersionV1 && version != formatVersionV2 {
-		return decodePlan{}, platform.New(platform.CodeValidation, "unsupported config format version")
-	}
-	if err := dec.skipString(); err != nil {
-		return decodePlan{}, platform.Wrap(platform.CodeIO, err, "read schema name")
-	}
-	if err := dec.skipString(); err != nil {
-		return decodePlan{}, platform.Wrap(platform.CodeIO, err, "read relations name")
-	}
-	if version >= formatVersionV2 {
-		if err := dec.skipString(); err != nil {
-			return decodePlan{}, platform.Wrap(platform.CodeIO, err, "read metadata description")
-		}
-		if err := dec.skipString(); err != nil {
-			return decodePlan{}, platform.Wrap(platform.CodeIO, err, "read metadata display name")
-		}
-		if err := dec.skipString(); err != nil {
-			return decodePlan{}, platform.Wrap(platform.CodeIO, err, "read metadata category")
-		}
-		if err := dec.skipStringList(); err != nil {
-			return decodePlan{}, platform.Wrap(platform.CodeIO, err, "read metadata tags")
-		}
-	}
-	if err := dec.skipString(); err != nil {
-		return decodePlan{}, platform.Wrap(platform.CodeIO, err, "read route")
-	}
-	serviceCount, err := dec.readUint16()
-	if err != nil {
-		return decodePlan{}, platform.Wrap(platform.CodeIO, err, "read service count")
-	}
-	for i := 0; i < int(serviceCount); i++ {
-		if err := dec.skipString(); err != nil {
-			return decodePlan{}, platform.Wrap(platform.CodeIO, err, "read service reference")
-		}
-	}
-	methodCount, err := dec.readUint16()
-	if err != nil {
-		return decodePlan{}, platform.Wrap(platform.CodeIO, err, "read method count")
-	}
-	paramCount := 0
-	for i := 0; i < int(methodCount); i++ {
-		if err := dec.skipString(); err != nil {
-			return decodePlan{}, platform.Wrap(platform.CodeIO, err, "read method reference")
-		}
-		if _, err := dec.readByte(); err != nil {
-			return decodePlan{}, platform.Wrap(platform.CodeIO, err, "read execution mode")
-		}
-		if _, err := dec.readCount(); err != nil {
-			return decodePlan{}, err
-		}
-		count, err := dec.skipParameters()
-		if err != nil {
-			return decodePlan{}, err
-		}
-		paramCount += count
-		if _, err := dec.readCount(); err != nil {
-			return decodePlan{}, err
-		}
-		count, err = dec.skipParameters()
-		if err != nil {
-			return decodePlan{}, err
-		}
-		paramCount += count
-		if _, err := dec.readByte(); err != nil {
-			return decodePlan{}, platform.Wrap(platform.CodeIO, err, "read output format")
-		}
-	}
-	relationCount, err := dec.readUint16()
-	if err != nil {
-		return decodePlan{}, platform.Wrap(platform.CodeIO, err, "read relation count")
-	}
-	for i := 0; i < int(relationCount); i++ {
-		if err := dec.skipString(); err != nil {
-			return decodePlan{}, platform.Wrap(platform.CodeIO, err, "read relation name")
-		}
-		if err := dec.skipString(); err != nil {
-			return decodePlan{}, platform.Wrap(platform.CodeIO, err, "read relation condition")
-		}
-	}
-	if dec.remaining() != 0 {
-		return decodePlan{}, platform.New(platform.CodeValidation, "unexpected trailing bytes in config")
-	}
-	return decodePlan{
-		serviceCount:   int(serviceCount),
-		methodCount:    int(methodCount),
-		relationCount:  int(relationCount),
-		parameterCount: paramCount,
-	}, nil
-}
-
-func decodeIntoWithPool(doc *schema.Document, pool []schema.Parameter, data []byte, plan decodePlan) error {
-	dec := newDecoder(data)
-	header, err := dec.readFixed(4)
-	if err != nil {
-		return platform.Wrap(platform.CodeIO, err, "read config magic")
-	}
-	if !bytes.Equal(header, magic[:]) {
-		return platform.New(platform.CodeValidation, "invalid config magic header")
-	}
-	version, err := dec.readUint16()
-	if err != nil {
-		return platform.Wrap(platform.CodeIO, err, "read config version")
-	}
-	if version != formatVersionV1 && version != formatVersionV2 {
-		return platform.New(platform.CodeValidation, "unsupported config format version")
-	}
-	if doc.Name, err = dec.readString(); err != nil {
-		return platform.Wrap(platform.CodeIO, err, "read schema name")
-	}
-	if doc.RelationsName, err = dec.readString(); err != nil {
-		return platform.Wrap(platform.CodeIO, err, "read relations name")
-	}
-	if version >= formatVersionV2 {
-		if doc.Metadata.Description, err = dec.readString(); err != nil {
-			return platform.Wrap(platform.CodeIO, err, "read metadata description")
-		}
-		if doc.Metadata.DisplayName, err = dec.readString(); err != nil {
-			return platform.Wrap(platform.CodeIO, err, "read metadata display name")
-		}
-		if doc.Metadata.Category, err = dec.readString(); err != nil {
-			return platform.Wrap(platform.CodeIO, err, "read metadata category")
-		}
-		if doc.Metadata.Tags, err = dec.readStringList(); err != nil {
-			return platform.Wrap(platform.CodeIO, err, "read metadata tags")
-		}
-	} else {
-		doc.Metadata = schema.Metadata{}
-	}
-	if doc.Route, err = dec.readString(); err != nil {
-		return platform.Wrap(platform.CodeIO, err, "read route")
-	}
-	serviceCount, err := dec.readUint16()
-	if err != nil {
-		return platform.Wrap(platform.CodeIO, err, "read service count")
-	}
-	if int(serviceCount) != plan.serviceCount {
-		return platform.New(platform.CodeValidation, "config decode plan mismatch for services")
-	}
-	for i := 0; i < int(serviceCount); i++ {
-		raw, err := dec.readString()
-		if err != nil {
-			return platform.Wrap(platform.CodeIO, err, "read service reference")
-		}
-		ref, err := schema.ParseServiceRef(raw)
-		if err != nil {
-			return err
-		}
-		doc.Services[i] = ref
-	}
-	methodCount, err := dec.readUint16()
-	if err != nil {
-		return platform.Wrap(platform.CodeIO, err, "read method count")
-	}
-	if int(methodCount) != plan.methodCount {
-		return platform.New(platform.CodeValidation, "config decode plan mismatch for methods")
-	}
-	offset := 0
-	for i := 0; i < int(methodCount); i++ {
-		raw, err := dec.readString()
-		if err != nil {
-			return platform.Wrap(platform.CodeIO, err, "read method reference")
-		}
-		ref, err := schema.ParseServiceRef(raw)
-		if err != nil {
-			return err
-		}
-		execByte, err := dec.readByte()
-		if err != nil {
-			return platform.Wrap(platform.CodeIO, err, "read execution mode")
-		}
-		inputCount, err := dec.readCount()
-		if err != nil {
-			return err
-		}
-		inputArgs, nextOffset, err := dec.readParametersInto(pool, offset)
-		if err != nil {
-			return err
-		}
-		offset = nextOffset
-		outputCount, err := dec.readCount()
-		if err != nil {
-			return err
-		}
-		outputArgs, nextOffset, err := dec.readParametersInto(pool, offset)
-		if err != nil {
-			return err
-		}
-		offset = nextOffset
-		formatByte, err := dec.readByte()
-		if err != nil {
-			return platform.Wrap(platform.CodeIO, err, "read output format")
-		}
-		doc.Methods[i] = schema.Method{
-			Reference:    ref,
-			Execution:    schema.ExecutionMode(execByte),
-			InputCount:   inputCount,
-			InputArgs:    inputArgs,
-			OutputCount:  outputCount,
-			OutputArgs:   outputArgs,
-			OutputFormat: schema.PayloadFormat(formatByte),
-		}
-	}
-	relationCount, err := dec.readUint16()
-	if err != nil {
-		return platform.Wrap(platform.CodeIO, err, "read relation count")
-	}
-	if int(relationCount) != plan.relationCount {
-		return platform.New(platform.CodeValidation, "config decode plan mismatch for relations")
-	}
-	for i := 0; i < int(relationCount); i++ {
-		name, err := dec.readString()
-		if err != nil {
-			return platform.Wrap(platform.CodeIO, err, "read relation name")
-		}
-		condition, err := dec.readString()
-		if err != nil {
-			return platform.Wrap(platform.CodeIO, err, "read relation condition")
-		}
-		doc.Relations[i] = schema.RelationRule{Name: name, Condition: condition}
-	}
-	if dec.remaining() != 0 {
-		return platform.New(platform.CodeValidation, "unexpected trailing bytes in config")
-	}
-	return nil
 }
 
 func IsEncoded(data []byte) bool {
@@ -579,11 +314,19 @@ func appendString(dst []byte, value string) []byte {
 	return append(dst, value...)
 }
 
-func appendCount(dst []byte, count int) []byte {
-	if count < 0 {
-		return appendUint16(dst, inferredCount)
+func appendCount(dst []byte, count int) ([]byte, error) {
+	switch {
+	case count == int(inferredCount):
+		return nil, platform.New(platform.CodeValidation, "declared count 65535 is reserved for inferred counts")
+	case count < -1:
+		return nil, platform.New(platform.CodeValidation, "declared count must be -1 or greater")
+	case count > int(^uint16(0))-1:
+		return nil, platform.New(platform.CodeValidation, "declared count exceeds wire format limit")
 	}
-	return appendUint16(dst, uint16(count))
+	if count < 0 {
+		return appendUint16(dst, inferredCount), nil
+	}
+	return appendUint16(dst, uint16(count)), nil
 }
 
 func stringSize(value string) int {
@@ -694,70 +437,6 @@ func (d *decoder) readParameters() ([]schema.Parameter, error) {
 	return params, nil
 }
 
-func (d *decoder) readParametersInto(pool []schema.Parameter, offset int) ([]schema.Parameter, int, error) {
-	count, err := d.readUint16()
-	if err != nil {
-		return nil, offset, platform.Wrap(platform.CodeIO, err, "read parameter count")
-	}
-	if offset+int(count) > len(pool) {
-		return nil, offset, platform.New(platform.CodeValidation, "config parameter pool overflow")
-	}
-	params := pool[offset : offset+int(count)]
-	for i := 0; i < int(count); i++ {
-		name, err := d.readString()
-		if err != nil {
-			return nil, offset, platform.Wrap(platform.CodeIO, err, "read parameter name")
-		}
-		typeByte, err := d.readByte()
-		if err != nil {
-			return nil, offset, platform.Wrap(platform.CodeIO, err, "read parameter type")
-		}
-		params[i] = schema.Parameter{Name: name, Type: schema.ArgType(typeByte)}
-	}
-	return params, offset + int(count), nil
-}
-
-func (d *decoder) skipString() error {
-	length, err := d.readUint16()
-	if err != nil {
-		return err
-	}
-	if d.off+int(length) > len(d.data) {
-		return platform.New(platform.CodeIO, "unexpected end of input")
-	}
-	d.off += int(length)
-	return nil
-}
-
-func (d *decoder) skipStringList() error {
-	count, err := d.readUint16()
-	if err != nil {
-		return platform.Wrap(platform.CodeIO, err, "read string list count")
-	}
-	for i := 0; i < int(count); i++ {
-		if err := d.skipString(); err != nil {
-			return platform.Wrap(platform.CodeIO, err, "read string list value")
-		}
-	}
-	return nil
-}
-
-func (d *decoder) skipParameters() (int, error) {
-	count, err := d.readUint16()
-	if err != nil {
-		return 0, platform.Wrap(platform.CodeIO, err, "read parameter count")
-	}
-	for i := 0; i < int(count); i++ {
-		if err := d.skipString(); err != nil {
-			return 0, platform.Wrap(platform.CodeIO, err, "read parameter name")
-		}
-		if _, err := d.readByte(); err != nil {
-			return 0, platform.Wrap(platform.CodeIO, err, "read parameter type")
-		}
-	}
-	return int(count), nil
-}
-
 func (d *decoder) remaining() int {
 	return len(d.data) - d.off
 }
@@ -766,7 +445,34 @@ func bytesToString(value []byte) string {
 	if len(value) == 0 {
 		return ""
 	}
-	return unsafe.String(unsafe.SliceData(value), len(value))
+	return string(value)
+}
+
+func cloneDocument(doc *schema.Document) *schema.Document {
+	if doc == nil {
+		return nil
+	}
+	cloned := &schema.Document{
+		Name:          doc.Name,
+		RelationsName: doc.RelationsName,
+		Metadata: schema.Metadata{
+			Description: doc.Metadata.Description,
+			Tags:        append([]string(nil), doc.Metadata.Tags...),
+			DisplayName: doc.Metadata.DisplayName,
+			Category:    doc.Metadata.Category,
+		},
+		Route:     doc.Route,
+		Services:  append([]schema.ServiceRef(nil), doc.Services...),
+		Relations: append([]schema.RelationRule(nil), doc.Relations...),
+	}
+	cloned.Methods = make([]schema.Method, len(doc.Methods))
+	for i, method := range doc.Methods {
+		clonedMethod := method
+		clonedMethod.InputArgs = append([]schema.Parameter(nil), method.InputArgs...)
+		clonedMethod.OutputArgs = append([]schema.Parameter(nil), method.OutputArgs...)
+		cloned.Methods[i] = clonedMethod
+	}
+	return cloned
 }
 
 func resizeServices(values []schema.ServiceRef, n int) []schema.ServiceRef {

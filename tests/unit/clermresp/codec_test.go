@@ -1,6 +1,7 @@
 package clermresp_test
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -78,5 +79,55 @@ func TestEncodeDecodeErrorResponse(t *testing.T) {
 	}
 	if decoded.Error.Code != "validation_error" || decoded.Error.Message != "provider lookup failed" {
 		t.Fatalf("unexpected error body: %#v", decoded.Error)
+	}
+}
+
+func TestWriteToMatchesEncode(t *testing.T) {
+	method := mustMethod(t)
+	response, err := clermresp.BuildSuccess(method, []byte(`{"request_id":"123e4567-e89b-12d3-a456-426614174000","providers":[]}`))
+	if err != nil {
+		t.Fatalf("BuildSuccess() error = %v", err)
+	}
+	encoded, err := clermresp.Encode(response)
+	if err != nil {
+		t.Fatalf("Encode() error = %v", err)
+	}
+	var buf bytes.Buffer
+	if err := clermresp.WriteTo(&buf, response); err != nil {
+		t.Fatalf("WriteTo() error = %v", err)
+	}
+	if !bytes.Equal(buf.Bytes(), encoded) {
+		t.Fatalf("WriteTo output did not match Encode output")
+	}
+}
+
+func TestEncodeRejectsOversizedStringsWithoutPanic(t *testing.T) {
+	oversized := strings.Repeat("m", 1<<16)
+	response := &clermresp.Response{Method: oversized}
+	if _, err := clermresp.Encode(response); err == nil || !strings.Contains(err.Error(), "response string too large") {
+		t.Fatalf("expected oversized string error, got %v", err)
+	}
+}
+
+func TestDecodeOwnsOutputPayloadBytes(t *testing.T) {
+	method := mustMethod(t)
+	response, err := clermresp.BuildSuccess(method, []byte(`{"request_id":"123e4567-e89b-12d3-a456-426614174000","providers":[{"id":"p-1"}]}`))
+	if err != nil {
+		t.Fatalf("BuildSuccess() error = %v", err)
+	}
+	encoded, err := clermresp.Encode(response)
+	if err != nil {
+		t.Fatalf("Encode() error = %v", err)
+	}
+	decoded, err := clermresp.Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	want := string(decoded.Outputs[1].Raw)
+	for i := range encoded {
+		encoded[i] = 'x'
+	}
+	if string(decoded.Outputs[1].Raw) != want {
+		t.Fatalf("decoded output payload corrupted after input mutation: got %q want %q", string(decoded.Outputs[1].Raw), want)
 	}
 }

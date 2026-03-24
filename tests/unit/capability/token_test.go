@@ -94,3 +94,55 @@ func TestMemoryReplayStoreRejectsReuse(t *testing.T) {
 		t.Fatal("expected replay rejection")
 	}
 }
+
+func TestAssertTimeWindowHonorsBoundaries(t *testing.T) {
+	var schemaHash [32]byte
+	schemaHash[0] = 1
+	token := &capability.Token{
+		KeyID:      "default",
+		Issuer:     "registry",
+		Subject:    "partner-123",
+		TokenID:    "tok-1",
+		Schema:     "@general.avail.mandene",
+		SchemaHash: schemaHash,
+		Relation:   "@verified",
+		Condition:  "auth.required",
+		IssuedAt:   time.Unix(1711000000, 0).UTC().Unix(),
+		NotBefore:  time.Unix(1711000005, 0).UTC().Unix(),
+		ExpiresAt:  time.Unix(1711000010, 0).UTC().Unix(),
+		Signature:  make([]byte, ed25519.SignatureSize),
+	}
+
+	if err := capability.AssertTimeWindow(token, time.Unix(1711000005, 0).UTC(), 0); err != nil {
+		t.Fatalf("AssertTimeWindow(at not_before) error = %v", err)
+	}
+	if err := capability.AssertTimeWindow(token, time.Unix(1711000010, 0).UTC(), 0); err != nil {
+		t.Fatalf("AssertTimeWindow(at expires_at) error = %v", err)
+	}
+	if err := capability.AssertTimeWindow(token, time.Unix(1711000011, 0).UTC(), 0); err == nil {
+		t.Fatal("expected expiry error after expires_at")
+	}
+}
+
+func TestVerifyTimeTreatsNegativeSkewAsZero(t *testing.T) {
+	var schemaHash [32]byte
+	schemaHash[0] = 1
+	token := &capability.Token{
+		KeyID:      "default",
+		Issuer:     "registry",
+		Subject:    "partner-123",
+		TokenID:    "tok-1",
+		Schema:     "@general.avail.mandene",
+		SchemaHash: schemaHash,
+		Relation:   "@verified",
+		Condition:  "auth.required",
+		IssuedAt:   time.Unix(1711000000, 0).UTC().Unix(),
+		NotBefore:  time.Unix(1711000005, 0).UTC().Unix(),
+		ExpiresAt:  time.Unix(1711000010, 0).UTC().Unix(),
+		Signature:  make([]byte, ed25519.SignatureSize),
+	}
+
+	if err := capability.VerifyTime(token, time.Unix(1711000004, 0).UTC(), -5*time.Second); err == nil {
+		t.Fatal("expected not-yet-valid error with negative skew treated as zero")
+	}
+}

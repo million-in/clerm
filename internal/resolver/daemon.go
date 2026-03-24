@@ -28,7 +28,16 @@ type daemonSchemaView struct {
 	RelationCount int    `json:"relation_count"`
 }
 
+type DaemonOptions struct {
+	AccessLogLevel *slog.Level
+}
+
 func NewDaemonHandler(logger *slog.Logger, service *Service) http.Handler {
+	defaultAccessLogLevel := slog.LevelDebug
+	return NewDaemonHandlerWithOptions(logger, service, DaemonOptions{AccessLogLevel: &defaultAccessLogLevel})
+}
+
+func NewDaemonHandlerWithOptions(logger *slog.Logger, service *Service, options DaemonOptions) http.Handler {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
@@ -80,8 +89,13 @@ func NewDaemonHandler(logger *slog.Logger, service *Service) http.Handler {
 			http.Error(w, "expected Content-Type: application/json", http.StatusUnsupportedMediaType)
 			return
 		}
+		payload, err := service.readPayload(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), httpStatus(err))
+			return
+		}
 		var input daemonEncodeRequest
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&input); err != nil {
+		if err := json.Unmarshal(payload, &input); err != nil {
 			http.Error(w, platform.Wrap(platform.CodeParse, err, "decode daemon encode request").Error(), http.StatusBadRequest)
 			return
 		}
@@ -93,18 +107,18 @@ func NewDaemonHandler(logger *slog.Logger, service *Service) http.Handler {
 			return
 		}
 		var response *clermresp.Response
-		var err error
+		var buildErr error
 		switch {
 		case input.Error != nil:
-			response, err = clermresp.BuildError(method, strings.TrimSpace(input.Error.Code), strings.TrimSpace(input.Error.Message))
+			response, buildErr = clermresp.BuildError(method, strings.TrimSpace(input.Error.Code), strings.TrimSpace(input.Error.Message))
 		case len(bytesOrDefault(input.Outputs, []byte("{}"))) > 0:
-			response, err = clermresp.BuildSuccess(method, bytesOrDefault(input.Outputs, []byte("{}")))
+			response, buildErr = clermresp.BuildSuccess(method, bytesOrDefault(input.Outputs, []byte("{}")))
 		default:
-			response, err = clermresp.BuildSuccess(method, []byte("{}"))
+			response, buildErr = clermresp.BuildSuccess(method, []byte("{}"))
 		}
-		if err != nil {
-			platform.LogError(logger, "daemon encode failed", err, "method", input.Method)
-			http.Error(w, err.Error(), httpStatus(err))
+		if buildErr != nil {
+			platform.LogError(logger, "daemon encode failed", buildErr, "method", input.Method)
+			http.Error(w, buildErr.Error(), httpStatus(buildErr))
 			return
 		}
 		w.Header().Set("Content-Type", "application/clerm")
@@ -115,21 +129,28 @@ func NewDaemonHandler(logger *slog.Logger, service *Service) http.Handler {
 			return
 		}
 	})
-	return requestLogMiddleware(logger, mux)
+	return requestLogMiddleware(logger, options.AccessLogLevel, mux)
 }
 
-func requestLogMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
+func requestLogMiddleware(logger *slog.Logger, level *slog.Level, next http.Handler) http.Handler {
+	if level == nil {
+		return next
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if logger == nil || !logger.Enabled(r.Context(), *level) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		started := time.Now()
 		recorder := &statusRecorder{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(recorder, r)
-		logger.Info("clerm resolver daemon request",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", recorder.statusCode,
-			"content_type", strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]),
-			"clerm_target", strings.TrimSpace(r.Header.Get("Clerm-Target")),
-			"elapsed_ms", time.Since(started).Milliseconds(),
+		logger.LogAttrs(r.Context(), *level, "clerm resolver daemon request",
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+			slog.Int("status", recorder.statusCode),
+			slog.String("content_type", strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0])),
+			slog.String("clerm_target", strings.TrimSpace(r.Header.Get("Clerm-Target"))),
+			slog.Int64("elapsed_ms", time.Since(started).Milliseconds()),
 		)
 	})
 }

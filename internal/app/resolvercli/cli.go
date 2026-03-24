@@ -76,7 +76,7 @@ func RunWithIO(logger *slog.Logger, streams Streams, args []string) error {
 		logger.Info("starting clerm resolver daemon",
 			"listen", address,
 			"schema", service.Document().Name,
-			"schema_fingerprint", fmt.Sprintf("%x", service.Document().PublicFingerprint()),
+			"schema_fingerprint", fmt.Sprintf("%x", service.Fingerprint()),
 		)
 	}
 	_, _ = fmt.Fprintf(streams.Stdout, "%s\n", address)
