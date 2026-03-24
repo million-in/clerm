@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/million-in/clerm/internal/clermcfg"
-	"github.com/million-in/clerm/internal/schema"
+	"github.com/million-in/clerm/clermcfg"
+	"github.com/million-in/clerm/schema"
 )
 
 func TestEncodeDecodeRoundTrip(t *testing.T) {

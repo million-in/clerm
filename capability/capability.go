@@ -25,14 +25,17 @@ var (
 	VerifyTime       = func(token *Token, now time.Time, skew time.Duration) error {
 		return internal.VerifyTime(token, now, skew)
 	}
-	EncodeText           = internal.EncodeText
-	DecodeText           = internal.DecodeText
-	Encode               = internal.Encode
-	Decode               = internal.Decode
-	ReadPrivateKeyFile   = internal.ReadPrivateKeyFile
-	ReadPublicKeyFile    = internal.ReadPublicKeyFile
-	WritePrivateKeyFile  = internal.WritePrivateKeyFile
-	WritePublicKeyFile   = internal.WritePublicKeyFile
-	GenerateKeyPair      = internal.GenerateKeyPair
-	NewMemoryReplayStore = func() *MemoryReplayStore { return internal.NewMemoryReplayStore() }
+	EncodeText                    = internal.EncodeText
+	DecodeText                    = internal.DecodeText
+	Encode                        = internal.Encode
+	Decode                        = internal.Decode
+	ReadPrivateKeyFile            = internal.ReadPrivateKeyFile
+	ReadPublicKeyFile             = internal.ReadPublicKeyFile
+	WritePrivateKeyFile           = internal.WritePrivateKeyFile
+	WritePublicKeyFile            = internal.WritePublicKeyFile
+	GenerateKeyPair               = internal.GenerateKeyPair
+	NewMemoryReplayStore          = func() *MemoryReplayStore { return internal.NewMemoryReplayStore() }
+	NewMemoryReplayStoreWithClock = func(now func() time.Time) *MemoryReplayStore {
+		return internal.NewMemoryReplayStoreWithClock(now)
+	}
 )

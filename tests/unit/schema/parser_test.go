@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/million-in/clerm/internal/schema"
+	"github.com/million-in/clerm/schema"
 )
 
 const validSchema = `

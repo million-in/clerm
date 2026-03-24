@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/million-in/clerm/internal/clermresp"
-	"github.com/million-in/clerm/internal/schema"
+	"github.com/million-in/clerm/clermresp"
+	"github.com/million-in/clerm/schema"
 )
 
 func mustMethod(t *testing.T) schema.Method {

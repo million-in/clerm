@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/million-in/clerm/internal/capability"
+	"github.com/million-in/clerm/capability"
 )
 
 func TestIssueEncodeDecodeVerify(t *testing.T) {

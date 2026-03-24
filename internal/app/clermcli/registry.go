@@ -34,7 +34,7 @@ type invokeResultView struct {
 	BodyBase64    string              `json:"body_base64,omitempty"`
 }
 
-type registryClient interface {
+type RegistryClient interface {
 	Register(context.Context, registryrpc.RegisterInput) (*registryrpc.RegisterOutput, error)
 	Search(context.Context, registryrpc.SearchInput) (*registryrpc.SearchOutput, error)
 	Discover(context.Context, registryrpc.SearchInput) (*registryrpc.SearchOutput, error)
@@ -45,8 +45,22 @@ type registryClient interface {
 	Invoke(context.Context, registryrpc.InvokeInput) (*registryrpc.InvokeOutput, error)
 }
 
-var registryClientFactory = func(baseURL string) (registryClient, error) {
+var registryClientFactory = func(baseURL string) (RegistryClient, error) {
 	return registryrpc.New(strings.TrimSpace(baseURL), nil)
+}
+
+func SetRegistryClientFactoryForTest(factory func(string) (RegistryClient, error)) func() {
+	previous := registryClientFactory
+	if factory == nil {
+		registryClientFactory = func(baseURL string) (RegistryClient, error) {
+			return registryrpc.New(strings.TrimSpace(baseURL), nil)
+		}
+	} else {
+		registryClientFactory = factory
+	}
+	return func() {
+		registryClientFactory = previous
+	}
 }
 
 type tokenCommandView struct {
@@ -367,7 +381,7 @@ func runInvoke(streams Streams, args []string) error {
 	return writeJSON(streams.Stdout, view)
 }
 
-func newRegistryClient(baseURL string) (registryClient, error) {
+func newRegistryClient(baseURL string) (RegistryClient, error) {
 	return registryClientFactory(baseURL)
 }
 

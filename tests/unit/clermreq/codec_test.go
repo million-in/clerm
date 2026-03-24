@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/million-in/clerm/internal/capability"
-	"github.com/million-in/clerm/internal/clermreq"
-	"github.com/million-in/clerm/internal/schema"
+	"github.com/million-in/clerm/capability"
+	"github.com/million-in/clerm/clermreq"
+	"github.com/million-in/clerm/schema"
 )
 
 func TestBuildEncodeDecodeRoundTrip(t *testing.T) {

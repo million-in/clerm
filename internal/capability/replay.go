@@ -21,8 +21,15 @@ type MemoryReplayStore struct {
 }
 
 func NewMemoryReplayStore() *MemoryReplayStore {
+	return NewMemoryReplayStoreWithClock(time.Now)
+}
+
+func NewMemoryReplayStoreWithClock(now func() time.Time) *MemoryReplayStore {
+	if now == nil {
+		now = time.Now
+	}
 	return &MemoryReplayStore{
-		now:  time.Now,
+		now:  now,
 		used: map[string]time.Time{},
 	}
 }

@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"net"
@@ -15,6 +16,8 @@ import (
 )
 
 const maxConfigPayloadBytes int64 = 8 << 20
+
+var lookupIPAddr = net.DefaultResolver.LookupIPAddr
 
 type URLPolicy func(context.Context, *url.URL) error
 
@@ -55,7 +58,7 @@ func LoadConfigURLWithOptions(ctx context.Context, rawURL string, options LoadCo
 	if httpClient == nil {
 		httpClient = defaultHTTPClient()
 	}
-	httpClient = clientWithURLPolicy(ctx, httpClient, options.URLPolicy)
+	httpClient = clientWithURLPolicy(httpClient, options.URLPolicy)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, trimmed, nil)
 	if err != nil {
 		return nil, platform.Wrap(platform.CodeInternal, err, "create schema request")
@@ -95,7 +98,7 @@ func defaultHTTPClient() *http.Client {
 	})
 }
 
-func clientWithURLPolicy(ctx context.Context, httpClient *http.Client, policy URLPolicy) *http.Client {
+func clientWithURLPolicy(httpClient *http.Client, policy URLPolicy) *http.Client {
 	if policy == nil {
 		return httpClient
 	}
@@ -109,8 +112,9 @@ func clientWithURLPolicy(ctx context.Context, httpClient *http.Client, policy UR
 		} else if len(via) >= 10 {
 			return errors.New("stopped after 10 redirects")
 		}
-		return policy(ctx, req.URL)
+		return policy(req.Context(), req.URL)
 	}
+	cloned.Transport = roundTripperWithPinnedResolution(cloned.Transport)
 	return &cloned
 }
 
@@ -146,7 +150,7 @@ func DenyPrivateHostPolicy(ctx context.Context, rawURL *url.URL) error {
 		}
 		return nil
 	}
-	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	addresses, err := lookupIPAddr(ctx, host)
 	if err != nil {
 		return platform.Wrap(platform.CodeIO, err, "resolve schema URL host")
 	}
@@ -174,4 +178,181 @@ func inCIDR(ip net.IP, cidr string) bool {
 		return false
 	}
 	return network.Contains(ip)
+}
+
+type pinnedResolution struct {
+	host string
+	port string
+	ips  []net.IP
+}
+
+type pinnedResolutionContextKey struct{}
+
+type pinnedResolutionRoundTripper struct {
+	base      http.RoundTripper
+	enablePin bool
+}
+
+func roundTripperWithPinnedResolution(base http.RoundTripper) http.RoundTripper {
+	base, supportsPinnedResolution := transportWithPinnedDial(base)
+	if !supportsPinnedResolution {
+		return base
+	}
+	return pinnedResolutionRoundTripper{
+		base:      base,
+		enablePin: true,
+	}
+}
+
+func (rt pinnedResolutionRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	if !rt.enablePin || request == nil || request.URL == nil {
+		return rt.base.RoundTrip(request)
+	}
+	resolution, err := resolvePinnedResolution(request.Context(), request.URL)
+	if err != nil {
+		return nil, platform.Wrap(platform.CodeIO, err, "resolve schema URL host")
+	}
+	request = request.Clone(context.WithValue(request.Context(), pinnedResolutionContextKey{}, resolution))
+	return rt.base.RoundTrip(request)
+}
+
+func transportWithPinnedDial(base http.RoundTripper) (http.RoundTripper, bool) {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	transport, ok := base.(*http.Transport)
+	if !ok {
+		return base, false
+	}
+	cloned := transport.Clone()
+	baseDialContext := cloned.DialContext
+	if baseDialContext == nil {
+		baseDialContext = (&net.Dialer{}).DialContext
+	}
+	cloned.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		return dialPinnedContext(ctx, network, address, baseDialContext)
+	}
+	if cloned.DialTLSContext != nil {
+		previousDialTLSContext := cloned.DialTLSContext
+		cloned.DialTLSContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			resolution, ok := pinnedResolutionFromContext(ctx)
+			if !ok || !matchesPinnedAddress(address, resolution.host, resolution.port) {
+				return previousDialTLSContext(ctx, network, address)
+			}
+			return dialPinnedTLSContext(ctx, network, resolution, cloned.TLSClientConfig)
+		}
+	}
+	return cloned, true
+}
+
+func dialPinnedContext(ctx context.Context, network, address string, dial func(context.Context, string, string) (net.Conn, error)) (net.Conn, error) {
+	resolution, ok := pinnedResolutionFromContext(ctx)
+	if !ok || !matchesPinnedAddress(address, resolution.host, resolution.port) {
+		return dial(ctx, network, address)
+	}
+	return dialPinnedAddresses(ctx, network, resolution, dial)
+}
+
+func dialPinnedTLSContext(ctx context.Context, network string, resolution pinnedResolution, config *tls.Config) (net.Conn, error) {
+	conn, err := dialPinnedAddresses(ctx, network, resolution, (&net.Dialer{}).DialContext)
+	if err != nil {
+		return nil, err
+	}
+	tlsConfig := &tls.Config{ServerName: resolution.host}
+	if config != nil {
+		tlsConfig = config.Clone()
+		if tlsConfig.ServerName == "" {
+			tlsConfig.ServerName = resolution.host
+		}
+	}
+	tlsConn := tls.Client(conn, tlsConfig)
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return tlsConn, nil
+}
+
+func dialPinnedAddresses(ctx context.Context, network string, resolution pinnedResolution, dial func(context.Context, string, string) (net.Conn, error)) (net.Conn, error) {
+	var lastErr error
+	for _, ip := range resolution.ips {
+		conn, err := dial(ctx, network, net.JoinHostPort(ip.String(), resolution.port))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if remoteIP := remoteConnIP(conn); remoteIP != nil && !remoteIP.Equal(ip) {
+			conn.Close()
+			lastErr = errors.New("resolved schema URL host dialed unexpected remote address")
+			continue
+		}
+		return conn, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, errors.New("schema URL host could not be resolved")
+}
+
+func resolvePinnedResolution(ctx context.Context, rawURL *url.URL) (pinnedResolution, error) {
+	host := strings.TrimSpace(rawURL.Hostname())
+	if host == "" {
+		return pinnedResolution{}, errors.New("schema URL host is required")
+	}
+	port := rawURL.Port()
+	if port == "" {
+		switch strings.ToLower(rawURL.Scheme) {
+		case "https":
+			port = "443"
+		default:
+			port = "80"
+		}
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return pinnedResolution{host: host, port: port, ips: []net.IP{ip}}, nil
+	}
+	addresses, err := lookupIPAddr(ctx, host)
+	if err != nil {
+		return pinnedResolution{}, err
+	}
+	if len(addresses) == 0 {
+		return pinnedResolution{}, errors.New("schema URL host could not be resolved")
+	}
+	ips := make([]net.IP, 0, len(addresses))
+	for _, address := range addresses {
+		if address.IP != nil {
+			ips = append(ips, address.IP)
+		}
+	}
+	if len(ips) == 0 {
+		return pinnedResolution{}, errors.New("schema URL host could not be resolved")
+	}
+	return pinnedResolution{host: host, port: port, ips: ips}, nil
+}
+
+func pinnedResolutionFromContext(ctx context.Context) (pinnedResolution, bool) {
+	if ctx == nil {
+		return pinnedResolution{}, false
+	}
+	resolution, ok := ctx.Value(pinnedResolutionContextKey{}).(pinnedResolution)
+	return resolution, ok
+}
+
+func matchesPinnedAddress(address, host, port string) bool {
+	dialHost, dialPort, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(dialHost, host) && dialPort == port
+}
+
+func remoteConnIP(conn net.Conn) net.IP {
+	if conn == nil || conn.RemoteAddr() == nil {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+	if err != nil {
+		return nil
+	}
+	return net.ParseIP(host)
 }

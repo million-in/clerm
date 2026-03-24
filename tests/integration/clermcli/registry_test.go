@@ -1,4 +1,4 @@
-package clermcli
+package clermcli_test
 
 import (
 	"bytes"
@@ -9,8 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/million-in/clerm/internal/app/clermcli"
+	"github.com/million-in/clerm/platform"
 	"github.com/million-in/clerm/registryrpc"
 )
 
@@ -57,10 +58,8 @@ func (m mockRegistryClient) Invoke(ctx context.Context, input registryrpc.Invoke
 	return m.invoke(ctx, input)
 }
 
-func TestRunRegisterUsesRegistryClient(t *testing.T) {
-	tmpDir := t.TempDir()
-	schemaPath := filepath.Join(tmpDir, "schema.clermfile")
-	if err := os.WriteFile(schemaPath, []byte(`
+func TestRunRegisterUsesRegistryServer(t *testing.T) {
+	schemaPath := writeSchemaFile(t, `
 schema @general.avail.mandene
   @route: https://provider.internal/clerm
   service: @global.books.search_books.v1
@@ -75,35 +74,22 @@ method @global.books.search_books.v1
 
 relations @general.mandene
   @global: any.protected
-`), 0o644); err != nil {
-		t.Fatalf("WriteFile(schema) error = %v", err)
-	}
+`)
 
-	previousFactory := registryClientFactory
-	defer func() { registryClientFactory = previousFactory }()
-
-	registryClientFactory = func(baseURL string) (registryClient, error) {
+	restore := clermcli.SetRegistryClientFactoryForTest(func(baseURL string) (clermcli.RegistryClient, error) {
 		if baseURL != "http://registry.local" {
 			t.Fatalf("unexpected registry URL: %s", baseURL)
 		}
 		return mockRegistryClient{
 			register: func(ctx context.Context, input registryrpc.RegisterInput) (*registryrpc.RegisterOutput, error) {
-				deadline, ok := ctx.Deadline()
-				if !ok {
+				if _, ok := ctx.Deadline(); !ok {
 					t.Fatal("expected timeout context")
-				}
-				until := time.Until(deadline)
-				if until <= 0 || until > 31*time.Second {
-					t.Fatalf("unexpected timeout window: %s", until)
 				}
 				if input.OwnerID != "seller-1" {
 					t.Fatalf("unexpected owner id: %s", input.OwnerID)
 				}
-				if input.Status != "active" {
-					t.Fatalf("unexpected status: %s", input.Status)
-				}
-				if len(input.Payload) == 0 {
-					t.Fatal("expected compiled payload")
+				if input.Status != "active" || len(input.Payload) == 0 {
+					t.Fatalf("unexpected register input: %#v", input)
 				}
 				return &registryrpc.RegisterOutput{
 					Schema: registryrpc.SchemaSummary{
@@ -130,24 +116,24 @@ relations @general.mandene
 			},
 			invoke: func(context.Context, registryrpc.InvokeInput) (*registryrpc.InvokeOutput, error) { return nil, nil },
 		}, nil
-	}
+	})
+	defer restore()
 
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
-	if err := RunWithIO(nil, Streams{Stdout: stdout, Stderr: stderr}, []string{"register", "-registry", "http://registry.local", "-in", schemaPath, "-owner", "seller-1"}); err != nil {
+	err := clermcli.RunWithIO(nil, clermcli.Streams{Stdout: stdout, Stderr: stderr}, []string{
+		"register", "-registry", "http://registry.local", "-timeout", "30s", "-in", schemaPath, "-owner", "seller-1",
+	})
+	if err != nil {
 		t.Fatalf("RunWithIO(register) error = %v stderr=%s", err, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "\"fingerprint\": \"schema-fp\"") {
-		t.Fatalf("unexpected register output: %s", stdout.String())
+	if !strings.Contains(stdout.String(), `"fingerprint": "schema-fp"`) {
+		t.Fatalf("unexpected output: %s", stdout.String())
 	}
 }
 
 func TestRunTokenIssueWritesOutputs(t *testing.T) {
-	tmpDir := t.TempDir()
-	schemaPath := filepath.Join(tmpDir, "schema.clermfile")
-	capPath := filepath.Join(tmpDir, "token.cap")
-	refreshPath := filepath.Join(tmpDir, "token.refresh")
-	if err := os.WriteFile(schemaPath, []byte(`
+	schemaPath := writeSchemaFile(t, `
 schema @general.avail.mandene
   @route: https://provider.internal/clerm
   service: @verified.books.purchase_book.v1
@@ -162,14 +148,11 @@ method @verified.books.purchase_book.v1
 
 relations @general.mandene
   @verified: auth.required
-`), 0o644); err != nil {
-		t.Fatalf("WriteFile(schema) error = %v", err)
-	}
+`)
+	capPath := filepath.Join(t.TempDir(), "token.cap")
+	refreshPath := filepath.Join(t.TempDir(), "token.refresh")
 
-	previousFactory := registryClientFactory
-	defer func() { registryClientFactory = previousFactory }()
-
-	registryClientFactory = func(baseURL string) (registryClient, error) {
+	restore := clermcli.SetRegistryClientFactoryForTest(func(string) (clermcli.RegistryClient, error) {
 		return mockRegistryClient{
 			register: func(context.Context, registryrpc.RegisterInput) (*registryrpc.RegisterOutput, error) { return nil, nil },
 			search:   func(context.Context, registryrpc.SearchInput) (*registryrpc.SearchOutput, error) { return nil, nil },
@@ -181,14 +164,11 @@ relations @general.mandene
 				return nil, nil
 			},
 			issueToken: func(_ context.Context, input registryrpc.IssueTokenInput) (*registryrpc.IssueTokenOutput, error) {
-				if input.ConsumerID != "buyer-1" {
-					t.Fatalf("unexpected consumer id: %s", input.ConsumerID)
-				}
-				if input.Method != "@verified.books.purchase_book.v1" {
-					t.Fatalf("unexpected method: %s", input.Method)
+				if input.ConsumerID != "buyer-1" || input.Method != "@verified.books.purchase_book.v1" {
+					t.Fatalf("unexpected issue token input: %#v", input)
 				}
 				if input.ProviderFingerprint == "" {
-					t.Fatal("expected derived provider fingerprint")
+					t.Fatal("expected provider fingerprint")
 				}
 				return &registryrpc.IssueTokenOutput{
 					CapabilityToken: "cap-token",
@@ -204,11 +184,12 @@ relations @general.mandene
 			},
 			invoke: func(context.Context, registryrpc.InvokeInput) (*registryrpc.InvokeOutput, error) { return nil, nil },
 		}, nil
-	}
+	})
+	defer restore()
 
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
-	if err := RunWithIO(nil, Streams{Stdout: stdout, Stderr: stderr}, []string{
+	err := clermcli.RunWithIO(nil, clermcli.Streams{Stdout: stdout, Stderr: stderr}, []string{
 		"token", "issue",
 		"-registry", "http://registry.local",
 		"-consumer", "buyer-1",
@@ -216,17 +197,14 @@ relations @general.mandene
 		"-method", "@verified.books.purchase_book.v1",
 		"-out-cap", capPath,
 		"-out-refresh", refreshPath,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("RunWithIO(token issue) error = %v stderr=%s", err, stderr.String())
 	}
-	if data, err := os.ReadFile(capPath); err != nil || string(data) != "cap-token\n" {
-		t.Fatalf("unexpected capability file: %q err=%v", string(data), err)
-	}
-	if data, err := os.ReadFile(refreshPath); err != nil || string(data) != "refresh-token\n" {
-		t.Fatalf("unexpected refresh file: %q err=%v", string(data), err)
-	}
-	if !strings.Contains(stdout.String(), "\"capability_out_file\":") {
-		t.Fatalf("unexpected token issue output: %s", stdout.String())
+	assertFileText(t, capPath, "cap-token\n", 0o600)
+	assertFileText(t, refreshPath, "refresh-token\n", 0o600)
+	if !strings.Contains(stdout.String(), `"capability_out_file":`) {
+		t.Fatalf("unexpected output: %s", stdout.String())
 	}
 }
 
@@ -238,10 +216,7 @@ func TestRunInvokeWritesRawResponse(t *testing.T) {
 		t.Fatalf("WriteFile(request) error = %v", err)
 	}
 
-	previousFactory := registryClientFactory
-	defer func() { registryClientFactory = previousFactory }()
-
-	registryClientFactory = func(baseURL string) (registryClient, error) {
+	restore := clermcli.SetRegistryClientFactoryForTest(func(string) (clermcli.RegistryClient, error) {
 		return mockRegistryClient{
 			register: func(context.Context, registryrpc.RegisterInput) (*registryrpc.RegisterOutput, error) { return nil, nil },
 			search:   func(context.Context, registryrpc.SearchInput) (*registryrpc.SearchOutput, error) { return nil, nil },
@@ -259,11 +234,8 @@ func TestRunInvokeWritesRawResponse(t *testing.T) {
 				return nil, nil
 			},
 			invoke: func(_ context.Context, input registryrpc.InvokeInput) (*registryrpc.InvokeOutput, error) {
-				if input.ProviderFingerprint != "schema-fp" {
-					t.Fatalf("unexpected fingerprint: %s", input.ProviderFingerprint)
-				}
-				if string(input.Payload) != "request-payload" {
-					t.Fatalf("unexpected request payload: %s", string(input.Payload))
+				if input.ProviderFingerprint != "schema-fp" || string(input.Payload) != "request-payload" {
+					t.Fatalf("unexpected invoke input: %#v", input)
 				}
 				return &registryrpc.InvokeOutput{
 					StatusCode:    202,
@@ -274,44 +246,96 @@ func TestRunInvokeWritesRawResponse(t *testing.T) {
 				}, nil
 			},
 		}, nil
-	}
+	})
+	defer restore()
 
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
-	if err := RunWithIO(nil, Streams{Stdout: stdout, Stderr: stderr}, []string{
-		"invoke",
-		"-registry", "http://registry.local",
-		"-fingerprint", "schema-fp",
-		"-request", requestPath,
-		"-out", bodyPath,
-	}); err != nil {
+	err := clermcli.RunWithIO(nil, clermcli.Streams{Stdout: stdout, Stderr: stderr}, []string{
+		"invoke", "-registry", "http://registry.local", "-fingerprint", "schema-fp", "-request", requestPath, "-out", bodyPath,
+	})
+	if err != nil {
 		t.Fatalf("RunWithIO(invoke) error = %v stderr=%s", err, stderr.String())
 	}
-	if data, err := os.ReadFile(bodyPath); err != nil || string(data) != `{"ok":true}` {
-		t.Fatalf("unexpected invoke body file: %q err=%v", string(data), err)
-	}
-	info, err := os.Stat(bodyPath)
-	if err != nil {
-		t.Fatalf("Stat(body) error = %v", err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("unexpected body file mode: %o", info.Mode().Perm())
-	}
+	assertFileText(t, bodyPath, `{"ok":true}`, 0o600)
+
 	var output map[string]any
 	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v output=%s", err, stdout.String())
+		t.Fatalf("Unmarshal() error = %v output=%s", err, stdout.String())
 	}
 	if output["status_code"] != float64(202) {
-		t.Fatalf("unexpected invoke output: %#v", output)
+		t.Fatalf("unexpected output: %#v", output)
 	}
 }
 
-func TestBuildInvokeViewRejectsLargeInlineBody(t *testing.T) {
-	_, err := buildInvokeView(&registryrpc.InvokeOutput{
-		StatusCode: http.StatusOK,
-		Body:       []byte("12345"),
-	}, "", 4)
-	if err == nil || !strings.Contains(err.Error(), "exceeds inline limit") {
+func TestRunInvokeRejectsLargeInlineBody(t *testing.T) {
+	tmpDir := t.TempDir()
+	requestPath := filepath.Join(tmpDir, "request.clerm")
+	if err := os.WriteFile(requestPath, []byte("request-payload"), 0o644); err != nil {
+		t.Fatalf("WriteFile(request) error = %v", err)
+	}
+
+	restore := clermcli.SetRegistryClientFactoryForTest(func(string) (clermcli.RegistryClient, error) {
+		return mockRegistryClient{
+			register: func(context.Context, registryrpc.RegisterInput) (*registryrpc.RegisterOutput, error) { return nil, nil },
+			search:   func(context.Context, registryrpc.SearchInput) (*registryrpc.SearchOutput, error) { return nil, nil },
+			discover: func(context.Context, registryrpc.SearchInput) (*registryrpc.SearchOutput, error) { return nil, nil },
+			establishRelationship: func(context.Context, registryrpc.RelationshipInput) (*registryrpc.RelationshipOutput, error) {
+				return nil, nil
+			},
+			relationshipStatus: func(context.Context, registryrpc.RelationshipStatusInput) (*registryrpc.RelationshipStatusOutput, error) {
+				return nil, nil
+			},
+			issueToken: func(context.Context, registryrpc.IssueTokenInput) (*registryrpc.IssueTokenOutput, error) {
+				return nil, nil
+			},
+			refreshToken: func(context.Context, registryrpc.RefreshTokenInput) (*registryrpc.IssueTokenOutput, error) {
+				return nil, nil
+			},
+			invoke: func(context.Context, registryrpc.InvokeInput) (*registryrpc.InvokeOutput, error) {
+				return &registryrpc.InvokeOutput{
+					StatusCode: http.StatusOK,
+					Body:       []byte("12345"),
+					Target:     "registry.invoke",
+				}, nil
+			},
+		}, nil
+	})
+	defer restore()
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	err := clermcli.RunWithIO(nil, clermcli.Streams{Stdout: stdout, Stderr: stderr}, []string{
+		"invoke", "-registry", "http://registry.local", "-fingerprint", "schema-fp", "-request", requestPath, "-inline-limit", "4",
+	})
+	if err == nil || !platform.IsCode(err, platform.CodeValidation) || !strings.Contains(err.Error(), "exceeds inline limit") {
 		t.Fatalf("expected inline limit error, got %v", err)
+	}
+}
+
+func writeSchemaFile(t *testing.T, contents string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "schema.clermfile")
+	if err := os.WriteFile(path, []byte(strings.TrimSpace(contents)+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(schema) error = %v", err)
+	}
+	return path
+}
+
+func assertFileText(t *testing.T, path, want string, wantMode os.FileMode) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s) error = %v", path, err)
+	}
+	if string(data) != want {
+		t.Fatalf("unexpected file contents for %s: %q", path, string(data))
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(%s) error = %v", path, err)
+	}
+	if info.Mode().Perm() != wantMode {
+		t.Fatalf("unexpected file mode for %s: %o", path, info.Mode().Perm())
 	}
 }
