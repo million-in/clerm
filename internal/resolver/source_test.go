@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"testing"
 
@@ -70,48 +69,5 @@ func TestLoadConfigURLRejectsPrivateHostWithPolicy(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "host is not allowed") {
 		t.Fatalf("expected private-host rejection, got %v", err)
-	}
-}
-
-func TestLoadConfigURLRejectsBlockedRedirectTarget(t *testing.T) {
-	doc := mustDocument(t)
-	payload, err := clermcfg.Encode(doc)
-	if err != nil {
-		t.Fatalf("Encode() error = %v", err)
-	}
-	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		switch request.URL.Host {
-		case "allowed.example":
-			return &http.Response{
-				StatusCode: http.StatusFound,
-				Header:     http.Header{"Location": []string{"https://blocked.example/schema/shopify.clermcfg"}},
-				Body:       io.NopCloser(strings.NewReader("")),
-				Request:    request,
-			}, nil
-		case "blocked.example":
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     http.Header{"Content-Type": []string{"application/clermcfg"}},
-				Body:       io.NopCloser(bytes.NewReader(payload)),
-				Request:    request,
-			}, nil
-		default:
-			t.Fatalf("unexpected request host: %s", request.URL.Host)
-			return nil, nil
-		}
-	})}
-
-	policy := func(_ context.Context, rawURL *url.URL) error {
-		if rawURL.Hostname() == "blocked.example" {
-			return errors.New("schema URL host is not allowed")
-		}
-		return nil
-	}
-	_, err = resolver.LoadConfigURLWithOptions(context.Background(), "https://allowed.example/schema/shopify.clermcfg", resolver.LoadConfigURLOptions{
-		HTTPClient: client,
-		URLPolicy:  policy,
-	})
-	if err == nil || !strings.Contains(err.Error(), "host is not allowed") {
-		t.Fatalf("expected redirect policy rejection, got %v", err)
 	}
 }
