@@ -22,7 +22,7 @@ jobs:
           cache: true
 
       - name: Run tests
-        run: go test ./... -count=1
+        run: go test ./tests/... -count=1
 
   build:
     needs: test
