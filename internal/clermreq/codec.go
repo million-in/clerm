@@ -151,6 +151,9 @@ func Decode(data []byte) (*Request, error) {
 	if err != nil {
 		return nil, platform.Wrap(platform.CodeIO, err, "read request argument count")
 	}
+	if err := dec.ensureCollectionCount(int(count), 7, "request argument"); err != nil {
+		return nil, err
+	}
 	request.Arguments = make([]Argument, count)
 	for i := 0; i < int(count); i++ {
 		name, err := dec.readString()
@@ -319,6 +322,22 @@ func (d *decoder) readBytes() (json.RawMessage, error) {
 
 func (d *decoder) remaining() int {
 	return len(d.data) - d.off
+}
+
+func (d *decoder) ensureCollectionCount(count int, minBytesPerItem int, label string) error {
+	if count < 0 {
+		return platform.New(platform.CodeValidation, label+" count is invalid")
+	}
+	if count == 0 {
+		return nil
+	}
+	if minBytesPerItem <= 0 {
+		return platform.New(platform.CodeInternal, "decoder min bytes per item is invalid")
+	}
+	if d.remaining()/minBytesPerItem < count {
+		return platform.New(platform.CodeValidation, label+" count exceeds remaining payload")
+	}
+	return nil
 }
 
 func bytesToString(value []byte) string {

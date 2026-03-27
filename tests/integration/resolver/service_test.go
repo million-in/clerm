@@ -472,6 +472,16 @@ func TestInvocationArgumentsViewAvoidsPerCallClone(t *testing.T) {
 	}
 }
 
+func TestServiceCloseIsIdempotent(t *testing.T) {
+	service := resolver.New(mustDocument(t))
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close(first) error = %v", err)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close(second) error = %v", err)
+	}
+}
+
 func TestServeHTTPEncodesHandlerErrorResponse(t *testing.T) {
 	doc := mustDocument(t)
 	service := resolver.New(doc)

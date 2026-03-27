@@ -141,6 +141,9 @@ func decodeInto(doc *schema.Document, data []byte) error {
 	if err != nil {
 		return platform.Wrap(platform.CodeIO, err, "read service count")
 	}
+	if err := dec.ensureCollectionCount(int(serviceCount), 2, "service"); err != nil {
+		return err
+	}
 	doc.Services = resizeServices(doc.Services, int(serviceCount))
 	for i := 0; i < int(serviceCount); i++ {
 		raw, err := dec.readString()
@@ -156,6 +159,9 @@ func decodeInto(doc *schema.Document, data []byte) error {
 	methodCount, err := dec.readUint16()
 	if err != nil {
 		return platform.Wrap(platform.CodeIO, err, "read method count")
+	}
+	if err := dec.ensureCollectionCount(int(methodCount), 12, "method"); err != nil {
+		return err
 	}
 	doc.Methods = resizeMethods(doc.Methods, int(methodCount))
 	for i := 0; i < int(methodCount); i++ {
@@ -204,6 +210,9 @@ func decodeInto(doc *schema.Document, data []byte) error {
 	relationCount, err := dec.readUint16()
 	if err != nil {
 		return platform.Wrap(platform.CodeIO, err, "read relation count")
+	}
+	if err := dec.ensureCollectionCount(int(relationCount), 4, "relation"); err != nil {
+		return err
 	}
 	doc.Relations = resizeRelations(doc.Relations, int(relationCount))
 	for i := 0; i < int(relationCount); i++ {
@@ -406,6 +415,9 @@ func (d *decoder) readStringList() ([]string, error) {
 	if err != nil {
 		return nil, platform.Wrap(platform.CodeIO, err, "read string list count")
 	}
+	if err := d.ensureCollectionCount(int(count), 2, "string list"); err != nil {
+		return nil, err
+	}
 	values := make([]string, int(count))
 	for i := 0; i < int(count); i++ {
 		value, err := d.readString()
@@ -421,6 +433,9 @@ func (d *decoder) readParameters() ([]schema.Parameter, error) {
 	count, err := d.readUint16()
 	if err != nil {
 		return nil, platform.Wrap(platform.CodeIO, err, "read parameter count")
+	}
+	if err := d.ensureCollectionCount(int(count), 3, "parameter"); err != nil {
+		return nil, err
 	}
 	params := make([]schema.Parameter, count)
 	for i := 0; i < int(count); i++ {
@@ -439,6 +454,22 @@ func (d *decoder) readParameters() ([]schema.Parameter, error) {
 
 func (d *decoder) remaining() int {
 	return len(d.data) - d.off
+}
+
+func (d *decoder) ensureCollectionCount(count int, minBytesPerItem int, label string) error {
+	if count < 0 {
+		return platform.New(platform.CodeValidation, label+" count is invalid")
+	}
+	if count == 0 {
+		return nil
+	}
+	if minBytesPerItem <= 0 {
+		return platform.New(platform.CodeInternal, "decoder min bytes per item is invalid")
+	}
+	if d.remaining()/minBytesPerItem < count {
+		return platform.New(platform.CodeValidation, label+" count exceeds remaining payload")
+	}
+	return nil
 }
 
 func bytesToString(value []byte) string {

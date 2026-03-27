@@ -75,3 +75,55 @@ relations @general.mandene
 		t.Fatalf("expected listen error after schema load, got %v", err)
 	}
 }
+
+func TestRunWithIORejectsReplacingRegularFileAtUnixSocketPath(t *testing.T) {
+	doc, err := schema.Parse(strings.NewReader(`
+schema @general.avail.mandene
+  @route: https://resolver.health.example/clerm
+  service: @global.healthcare.search_providers.v1
+
+method @global.healthcare.search_providers.v1
+  @exec: sync
+  @args_input: 1
+    decl_args: specialty.STRING
+  @args_output: 1
+    decl_args: request_id.UUID
+    decl_format: json
+
+relations @general.mandene
+  @global: any.protected
+`))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	payload, err := clermcfg.Encode(doc)
+	if err != nil {
+		t.Fatalf("Encode() error = %v", err)
+	}
+	tmpDir := t.TempDir()
+	schemaPath := tmpDir + "/schema.clermcfg"
+	socketPath := tmpDir + "/resolver.sock"
+	if err := os.WriteFile(schemaPath, payload, 0o644); err != nil {
+		t.Fatalf("WriteFile(schema) error = %v", err)
+	}
+	if err := os.WriteFile(socketPath, []byte("do not clobber"), 0o644); err != nil {
+		t.Fatalf("WriteFile(socketPath) error = %v", err)
+	}
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	err = resolvercli.RunWithIO(nil, resolvercli.Streams{Stdout: stdout, Stderr: stderr}, []string{
+		"-schema", schemaPath,
+		"-unix-socket", socketPath,
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing to replace a non-socket file") {
+		t.Fatalf("expected regular-file protection error, got %v", err)
+	}
+	data, readErr := os.ReadFile(socketPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(socketPath) error = %v", readErr)
+	}
+	if string(data) != "do not clobber" {
+		t.Fatalf("expected regular file to remain untouched, got %q", string(data))
+	}
+}

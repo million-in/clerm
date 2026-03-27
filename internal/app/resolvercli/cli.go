@@ -62,11 +62,14 @@ func RunWithIO(logger *slog.Logger, streams Streams, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer service.Close()
 	service.SetMaxBodyBytes(*maxBodyBytes)
 	server := &http.Server{
 		Addr:              *listen,
 		Handler:           clerm.Resolver.NewDaemonHandler(logger, service),
+		ReadTimeout:       15 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       90 * time.Second,
 	}
 	listener, address, err := daemonListener(*listen, *unixSocket)
@@ -77,7 +80,7 @@ func RunWithIO(logger *slog.Logger, streams Streams, args []string) error {
 		logger.Info("starting clerm resolver daemon",
 			"listen", address,
 			"schema", service.Document().Name,
-			"schema_fingerprint", fmt.Sprintf("%x", service.Fingerprint()),
+			"schema_fingerprint", service.FingerprintText(),
 		)
 	}
 	_, _ = fmt.Fprintf(streams.Stdout, "%s\n", address)
@@ -117,8 +120,15 @@ func daemonListener(listen string, unixSocket string) (net.Listener, string, err
 		return listener, listener.Addr().String(), nil
 	}
 	path := filepath.Clean(strings.TrimSpace(unixSocket))
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, "", platform.Wrap(platform.CodeIO, err, "remove existing Unix socket")
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSocket == 0 {
+			return nil, "", platform.New(platform.CodeValidation, "refusing to replace a non-socket file at Unix socket path")
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, "", platform.Wrap(platform.CodeIO, err, "remove existing Unix socket")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, "", platform.Wrap(platform.CodeIO, err, "inspect Unix socket path")
 	}
 	listener, err := net.Listen("unix", path)
 	if err != nil {

@@ -166,6 +166,45 @@ func BenchmarkInvocationArgumentsAccess(b *testing.B) {
 	}
 }
 
+func BenchmarkInvocationMarshalJSON(b *testing.B) {
+	service := resolver.New(benchmarkDocument(b))
+	for _, benchCase := range benchmarkCases(b) {
+		benchCase := benchCase
+		b.Run(benchCase.name+"/arguments", func(b *testing.B) {
+			invocation, err := service.ResolveInvocationWithTarget(benchCase.payload, "internal.search")
+			if err != nil {
+				b.Fatalf("ResolveInvocationWithTarget() error = %v", err)
+			}
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				payload, err := invocation.MarshalArgumentsJSON()
+				if err != nil {
+					b.Fatalf("MarshalArgumentsJSON() error = %v", err)
+				}
+				if len(payload) == 0 {
+					b.Fatal("expected payload")
+				}
+			}
+		})
+		b.Run(benchCase.name+"/command", func(b *testing.B) {
+			invocation, err := service.ResolveInvocationWithTarget(benchCase.payload, "internal.search")
+			if err != nil {
+				b.Fatalf("ResolveInvocationWithTarget() error = %v", err)
+			}
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				payload, err := invocation.MarshalCommandJSON()
+				if err != nil {
+					b.Fatalf("MarshalCommandJSON() error = %v", err)
+				}
+				if len(payload) == 0 {
+					b.Fatal("expected payload")
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkExecuteBinary(b *testing.B) {
 	service := resolver.New(benchmarkDocument(b))
 	for _, benchCase := range benchmarkCases(b) {

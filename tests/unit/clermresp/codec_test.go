@@ -131,3 +131,11 @@ func TestDecodeOwnsOutputPayloadBytes(t *testing.T) {
 		t.Fatalf("decoded output payload corrupted after input mutation: got %q want %q", string(decoded.Outputs[1].Raw), want)
 	}
 }
+
+func TestDecodeRejectsImpossibleOutputCount(t *testing.T) {
+	payload := []byte{'C', 'L', 'R', 'S', 0, 1, 0, 0, 0, 0xff, 0xff}
+
+	if _, err := clermresp.Decode(payload); err == nil || !strings.Contains(err.Error(), "response output count exceeds remaining payload") {
+		t.Fatalf("expected output count guard, got %v", err)
+	}
+}

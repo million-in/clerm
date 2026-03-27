@@ -19,9 +19,12 @@ const defaultReplaySweepInterval = 30 * time.Second
 // It is not sufficient for multi-process or multi-host deployments; use a
 // distributed ReplayStore implementation in production for shared replay protection.
 type MemoryReplayStore struct {
-	now      func() time.Time
-	shards   [replayShardCount]replayShard
-	sweepDur time.Duration
+	now       func() time.Time
+	shards    [replayShardCount]replayShard
+	sweepDur  time.Duration
+	stop      chan struct{}
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 type replayShard struct {
@@ -49,6 +52,8 @@ func NewMemoryReplayStoreWithClockAndSweep(now func() time.Time, sweepInterval t
 		store.shards[i].used = make(map[string]time.Time)
 	}
 	if sweepInterval > 0 {
+		store.stop = make(chan struct{})
+		store.done = make(chan struct{})
 		go store.cleanupLoop()
 	}
 	return store
@@ -88,19 +93,36 @@ func (s *MemoryReplayStore) nowTime() time.Time {
 func (s *MemoryReplayStore) cleanupLoop() {
 	ticker := time.NewTicker(s.sweepDur)
 	defer ticker.Stop()
-	for range ticker.C {
-		now := s.nowTime()
-		for i := range s.shards {
-			shard := &s.shards[i]
-			shard.mu.Lock()
-			for key, expiry := range shard.used {
-				if !expiry.After(now) {
-					delete(shard.used, key)
+	defer close(s.done)
+	for {
+		select {
+		case <-ticker.C:
+			now := s.nowTime()
+			for i := range s.shards {
+				shard := &s.shards[i]
+				shard.mu.Lock()
+				for key, expiry := range shard.used {
+					if !expiry.After(now) {
+						delete(shard.used, key)
+					}
 				}
+				shard.mu.Unlock()
 			}
-			shard.mu.Unlock()
+		case <-s.stop:
+			return
 		}
 	}
+}
+
+func (s *MemoryReplayStore) Close() error {
+	if s == nil || s.stop == nil {
+		return nil
+	}
+	s.closeOnce.Do(func() {
+		close(s.stop)
+		<-s.done
+	})
+	return nil
 }
 
 func (s *MemoryReplayStore) shardFor(tokenID string) *replayShard {

@@ -2,6 +2,7 @@ package capability_test
 
 import (
 	"crypto/ed25519"
+	"strings"
 	"testing"
 	"time"
 
@@ -144,5 +145,25 @@ func TestVerifyTimeTreatsNegativeSkewAsZero(t *testing.T) {
 
 	if err := capability.VerifyTime(token, time.Unix(1711000004, 0).UTC(), -5*time.Second); err == nil {
 		t.Fatal("expected not-yet-valid error with negative skew treated as zero")
+	}
+}
+
+func TestDecodeRejectsImpossibleStringListCount(t *testing.T) {
+	payload := append([]byte{'C', 'L', 'C', 'P', 0, 1},
+		0, 0, // key_id
+		0, 0, // issuer
+		0, 0, // subject
+		0, 0, // token_id
+		0, 0, // schema
+	)
+	payload = append(payload, make([]byte, 32)...)
+	payload = append(payload,
+		0, 0, // relation
+		0, 0, // condition
+		0xff, 0xff, // methods count
+	)
+
+	if _, err := capability.Decode(payload); err == nil || !strings.Contains(err.Error(), "capability string list count exceeds remaining payload") {
+		t.Fatalf("expected string list count guard, got %v", err)
 	}
 }

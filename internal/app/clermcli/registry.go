@@ -472,9 +472,7 @@ func writeTokenOutputs(output *registryrpc.IssueTokenOutput, capPath string, ref
 		return nil, platform.New(platform.CodeInternal, "token output is required")
 	}
 	view := &tokenCommandView{
-		CapabilityToken:  output.CapabilityToken,
 		ExpiresAt:        output.ExpiresAt,
-		RefreshToken:     output.RefreshToken,
 		RefreshExpiresAt: output.RefreshExpires,
 		Relation:         output.Relation,
 		Condition:        output.Condition,
@@ -484,12 +482,16 @@ func writeTokenOutputs(output *registryrpc.IssueTokenOutput, capPath string, ref
 			return nil, platform.Wrap(platform.CodeIO, err, "write capability token")
 		}
 		view.CapabilityOutFile = capPath
+	} else {
+		view.CapabilityToken = output.CapabilityToken
 	}
 	if strings.TrimSpace(refreshPath) != "" {
 		if err := os.WriteFile(refreshPath, []byte(output.RefreshToken+"\n"), 0o600); err != nil {
 			return nil, platform.Wrap(platform.CodeIO, err, "write refresh token")
 		}
 		view.RefreshOutFile = refreshPath
+	} else {
+		view.RefreshToken = output.RefreshToken
 	}
 	return view, nil
 }
@@ -497,7 +499,7 @@ func writeTokenOutputs(output *registryrpc.IssueTokenOutput, capPath string, ref
 func buildInvokeView(output *registryrpc.InvokeOutput, outPath string, inlineLimit int) (*invokeResultView, error) {
 	view := &invokeResultView{
 		StatusCode:    output.StatusCode,
-		Headers:       output.Headers,
+		Headers:       redactSensitiveHeaders(output.Headers),
 		Target:        output.Target,
 		CommandMethod: output.CommandMethod,
 		BodyBytes:     len(output.Body),
@@ -518,6 +520,30 @@ func buildInvokeView(output *registryrpc.InvokeOutput, outPath string, inlineLim
 	}
 	view.BodyBase64 = base64.RawStdEncoding.EncodeToString(output.Body)
 	return view, nil
+}
+
+func redactSensitiveHeaders(headers map[string][]string) map[string][]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	redacted := make(map[string][]string, len(headers))
+	for key, values := range headers {
+		if isSensitiveHeader(key) {
+			redacted[key] = []string{"REDACTED"}
+			continue
+		}
+		redacted[key] = append([]string(nil), values...)
+	}
+	return redacted
+}
+
+func isSensitiveHeader(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key", "x-auth-token":
+		return true
+	default:
+		return false
+	}
 }
 
 func durationSeconds(value time.Duration) int64 {

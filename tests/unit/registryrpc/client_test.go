@@ -27,7 +27,7 @@ func TestRegisterSendsCompiledPayload(t *testing.T) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"schema":{"fingerprint":"abc","public_fingerprint":"def","schema_name":"schema","owner_id":"seller-1","status":"active","methods":[],"relations":[]}}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"schema":{"fingerprint":"abc","public_fingerprint":"def","schema_name":"schema","owner_id":"seller-1","status":"active","schema_url":"https://signed.example/schema.clermcfg","methods":[],"relations":[]},"registration_status":"created"}`)),
 		}, nil
 	})})
 	if err != nil {
@@ -45,6 +45,12 @@ func TestRegisterSendsCompiledPayload(t *testing.T) {
 	if output.Schema.Fingerprint != "abc" {
 		t.Fatalf("unexpected fingerprint: %s", output.Schema.Fingerprint)
 	}
+	if output.Schema.SchemaURL != "https://signed.example/schema.clermcfg" {
+		t.Fatalf("unexpected schema url: %s", output.Schema.SchemaURL)
+	}
+	if output.RegistrationStatus != "created" {
+		t.Fatalf("unexpected registration status: %s", output.RegistrationStatus)
+	}
 }
 
 func TestNewRejectsMissingBaseURL(t *testing.T) {
@@ -53,6 +59,17 @@ func TestNewRejectsMissingBaseURL(t *testing.T) {
 	_, err := registryrpc.New("   ", nil)
 	if err == nil || !platform.IsCode(err, platform.CodeInvalidArgument) {
 		t.Fatalf("expected invalid base URL error, got %v", err)
+	}
+}
+
+func TestNewRejectsUnsupportedSchemeAndEmbeddedCredentials(t *testing.T) {
+	t.Parallel()
+
+	if _, err := registryrpc.New("ftp://registry.local", nil); err == nil || !platform.IsCode(err, platform.CodeInvalidArgument) {
+		t.Fatalf("expected unsupported-scheme error, got %v", err)
+	}
+	if _, err := registryrpc.New("https://user:pass@registry.local", nil); err == nil || !platform.IsCode(err, platform.CodeInvalidArgument) {
+		t.Fatalf("expected embedded-credentials error, got %v", err)
 	}
 }
 
@@ -76,7 +93,7 @@ func TestSearchSendsJSONRequest(t *testing.T) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"results":[{"fingerprint":"fp-1","schema_name":"books","owner_id":"seller-1","status":"active","relations":[{"name":"@global","condition":"any.protected","token_required":false}],"methods":[{"reference":"@global.books.search_books.v1","relation":"@global","condition":"any.protected","execution":"sync","input_count":1,"output_count":1,"output_format":"json"}],"metadata":{"display_name":"Books"}}]}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"results":[{"fingerprint":"fp-1","public_fingerprint":"public-fp-1","schema_name":"books","owner_id":"seller-1","status":"active","schema_url":"https://signed.example/books.clermcfg","relations":[{"name":"@global","condition":"any.protected","token_required":false}],"methods":[{"reference":"@global.books.search_books.v1","relation":"@global","condition":"any.protected","execution":"sync","input_count":1,"output_count":1,"output_format":"json"}],"metadata":{"display_name":"Books"}}]}`)),
 		}, nil
 	})})
 	if err != nil {
@@ -93,6 +110,9 @@ func TestSearchSendsJSONRequest(t *testing.T) {
 	}
 	if len(output.Results) != 1 {
 		t.Fatalf("unexpected search output: %#v", output)
+	}
+	if output.Results[0].SchemaURL != "https://signed.example/books.clermcfg" {
+		t.Fatalf("unexpected schema url: %s", output.Results[0].SchemaURL)
 	}
 }
 
@@ -160,6 +180,32 @@ func TestInvokeReturnsRegistryValidationErrors(t *testing.T) {
 	}
 	if !platform.IsCode(err, platform.CodeValidation) {
 		t.Fatalf("unexpected error code: %v", err)
+	}
+}
+
+func TestInvokeRejectsOversizedResponseBody(t *testing.T) {
+	t.Parallel()
+
+	client, err := registryrpc.New("http://registry.local", &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Clerm-Target": []string{"registry.invoke"},
+			},
+			Body: io.NopCloser(strings.NewReader(`12345`)),
+		}, nil
+	})})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = client.Invoke(context.Background(), registryrpc.InvokeInput{
+		ProviderFingerprint: "schema-fp",
+		Payload:             []byte("request"),
+		MaxResponseBytes:    4,
+	})
+	if err == nil || !platform.IsCode(err, platform.CodeValidation) {
+		t.Fatalf("expected oversized invoke body error, got %v", err)
 	}
 }
 

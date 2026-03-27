@@ -52,3 +52,13 @@ func TestMemoryReplayStoreConcurrentReserveAllowsSingleWinner(t *testing.T) {
 		t.Fatalf("expected exactly one successful reserve, got %d", successCount)
 	}
 }
+
+func TestMemoryReplayStoreCloseIsIdempotent(t *testing.T) {
+	store := capability.NewMemoryReplayStoreWithClockAndSweep(time.Now, time.Millisecond)
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close(first) error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close(second) error = %v", err)
+	}
+}

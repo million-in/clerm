@@ -244,11 +244,20 @@ type Document struct {
 }
 
 type FingerprintCache struct {
-	values sync.Map
+	mu     sync.RWMutex
+	values map[*Document][32]byte
+	order  []*Document
+	limit  int
 }
 
+const defaultFingerprintCacheSize = 128
+
 func NewFingerprintCache() *FingerprintCache {
-	return &FingerprintCache{}
+	return &FingerprintCache{
+		values: make(map[*Document][32]byte, defaultFingerprintCacheSize),
+		order:  make([]*Document, 0, defaultFingerprintCacheSize),
+		limit:  defaultFingerprintCacheSize,
+	}
 }
 
 func (c *FingerprintCache) Public(doc *Document) [32]byte {
@@ -258,19 +267,56 @@ func (c *FingerprintCache) Public(doc *Document) [32]byte {
 	if c == nil {
 		return computePublicFingerprint(doc)
 	}
-	if cached, ok := c.values.Load(doc); ok {
-		return cached.([32]byte)
+	c.mu.RLock()
+	if cached, ok := c.values[doc]; ok {
+		c.mu.RUnlock()
+		return cached
 	}
+	c.mu.RUnlock()
 	sum := computePublicFingerprint(doc)
-	actual, _ := c.values.LoadOrStore(doc, sum)
-	return actual.([32]byte)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ensureInit()
+	if cached, ok := c.values[doc]; ok {
+		return cached
+	}
+	if len(c.order) >= c.limit {
+		evicted := c.order[0]
+		c.order = c.order[1:]
+		delete(c.values, evicted)
+	}
+	c.values[doc] = sum
+	c.order = append(c.order, doc)
+	return sum
 }
 
 func (c *FingerprintCache) Invalidate(doc *Document) {
 	if c == nil || doc == nil {
 		return
 	}
-	c.values.Delete(doc)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.values, doc)
+	for i, candidate := range c.order {
+		if candidate != doc {
+			continue
+		}
+		copy(c.order[i:], c.order[i+1:])
+		c.order = c.order[:len(c.order)-1]
+		return
+	}
+}
+
+func (c *FingerprintCache) ensureInit() {
+	if c.limit <= 0 {
+		c.limit = defaultFingerprintCacheSize
+	}
+	if c.values == nil {
+		c.values = make(map[*Document][32]byte, c.limit)
+	}
+	if c.order == nil {
+		c.order = make([]*Document, 0, c.limit)
+	}
 }
 
 var defaultFingerprintCache = NewFingerprintCache()
@@ -484,7 +530,8 @@ func computePublicFingerprint(d *Document) [32]byte {
 }
 
 func validateParameters(params []Parameter) error {
-	for i, param := range params {
+	seen := make(map[string]struct{}, len(params))
+	for _, param := range params {
 		name := strings.TrimSpace(param.Name)
 		if name == "" {
 			return platform.New(platform.CodeValidation, "parameter name is required")
@@ -492,11 +539,10 @@ func validateParameters(params []Parameter) error {
 		if param.Type == ArgUnknown {
 			return platform.New(platform.CodeValidation, fmt.Sprintf("parameter %s has unknown type", name))
 		}
-		for j := 0; j < i; j++ {
-			if params[j].Name == name {
-				return platform.New(platform.CodeValidation, fmt.Sprintf("duplicate parameter %s", name))
-			}
+		if _, ok := seen[name]; ok {
+			return platform.New(platform.CodeValidation, fmt.Sprintf("duplicate parameter %s", name))
 		}
+		seen[name] = struct{}{}
 	}
 	return nil
 }

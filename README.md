@@ -39,22 +39,59 @@ The lower-level packages (`schema`, `clermcfg`, `clermreq`, `resolver`,
 ```go
 doc, err := clerm.Compiler.LoadDocument("examples/provider_search.clermfile")
 if err != nil {
-    log.Fatal(err)
+	log.Fatal(err)
 }
 
 request, err := clerm.Compiler.EncodeRequest(doc, clerm.BuildRequestInput{
-    MethodReference: "@global.healthcare.search_providers.v1",
-    AllowedRelations: []string{"@global"},
-    PayloadJSON: []byte(`{"specialty":"cardiology","latitude":40.7,"longitude":-73.9}`),
+	MethodReference:  "@global.healthcare.search_providers.v1",
+	AllowedRelations: []string{"@global"},
+	PayloadJSON:      []byte(`{"specialty":"cardiology","latitude":40.7,"longitude":-73.9}`),
 })
 if err != nil {
-    log.Fatal(err)
+	log.Fatal(err)
 }
 
 service, err := clerm.Resolver.NewService(doc, clerm.ServiceOptions{})
 if err != nil {
-    log.Fatal(err)
+	log.Fatal(err)
 }
+```
+
+For LLM-driven sessions, the compiler now exports vendor-native tool schemas for
+OpenAI and Anthropic, and it can compile those tool calls directly into `.clerm`
+request bytes:
+
+```go
+tools, err := clerm.Compiler.OpenAITools(doc, []string{"@global"})
+if err != nil {
+	log.Fatal(err)
+}
+
+call := []byte(`{"type":"function","function":{"name":"` + tools[0].Function.Name + `","arguments":"{\"specialty\":\"cardiology\",\"latitude\":40.7,\"longitude\":-73.9}"}}`)
+encoded, err := clerm.Compiler.EncodeOpenAIToolCallJSON(doc, call, clerm.ToolCallOptions{
+	AllowedRelations: []string{"@global"},
+})
+if err != nil {
+	log.Fatal(err)
+}
+```
+
+The resolver now also exposes upstream forwarding helpers so embedded apps can
+decode CLERM, route to internal REST or GraphQL APIs, and return encoded CLERM
+responses without writing the adapter glue repeatedly:
+
+```go
+if err := clerm.Resolver.BindREST(service, "@global.healthcare.search_providers.v1", http.DefaultClient, clerm.RESTRoute{
+	URL: "https://internal.example/search",
+}); err != nil {
+	log.Fatal(err)
+}
+
+result, err := clerm.Resolver.ExecuteBinary(ctx, service, encoded.Payload, "internal.search")
+if err != nil {
+	log.Printf("upstream execution returned CLERM error payload: %v", err)
+}
+_ = result.Payload
 ```
 
 ## Schema Metadata

@@ -19,3 +19,8 @@ This keeps CLERM binary parsing, token verification, and response encoding in on
 
 The daemon HTTP contract used by these examples is covered by the compatibility
 tests under `tests/compatibility/clerm`.
+
+For agent-driven integrations, the Go compiler library can now emit
+OpenAI-compatible `tools` and Anthropic-compatible `input_schema` definitions.
+Non-Go services can still use those tool schemas at the edge, then hand the
+resulting `.clerm` bytes to the local daemon for decode and response encoding.

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/million-in/clerm"
 	"github.com/million-in/clerm/internal/capability"
@@ -18,6 +19,8 @@ import (
 	"github.com/million-in/clerm/resolver"
 	"github.com/million-in/clerm/schema"
 )
+
+const defaultServeListenAddress = "127.0.0.1:8181"
 
 type Streams struct {
 	Stdout io.Writer
@@ -221,7 +224,7 @@ func runRequest(streams Streams, args []string) error {
 	if *out == "" {
 		*out = encoded.Method.Reference.Method + ".clerm"
 	}
-	if err := os.WriteFile(*out, encoded.Payload, 0o644); err != nil {
+	if err := os.WriteFile(*out, encoded.Payload, 0o600); err != nil {
 		return platform.Wrap(platform.CodeIO, err, "write request file")
 	}
 	_, _ = fmt.Fprintf(streams.Stdout, "%s\n", *out)
@@ -246,6 +249,7 @@ func runResolve(streams Streams, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer service.Close()
 	payload, err := os.ReadFile(*requestPath)
 	if err != nil {
 		return platform.Wrap(platform.CodeIO, err, "read request file")
@@ -261,7 +265,7 @@ func runServe(logger *slog.Logger, streams Streams, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(streams.Stderr)
 	schemaPath := fs.String("schema", "", "path to .clermfile or .clermcfg")
-	listen := fs.String("listen", ":8080", "listen address")
+	listen := fs.String("listen", defaultServeListenAddress, "listen address")
 	publicKeyPath := fs.String("cap-public-key", "", "path to Ed25519 public key for capability verification")
 	keyID := fs.String("cap-key-id", "default", "capability verification key id")
 	if err := fs.Parse(args); err != nil {
@@ -274,9 +278,17 @@ func runServe(logger *slog.Logger, streams Streams, args []string) error {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Addr: *listen, Handler: clerm.Resolver.NewDaemonHandler(logger, service)}
+	defer service.Close()
+	server := &http.Server{
+		Addr:              *listen,
+		Handler:           clerm.Resolver.NewDaemonHandler(logger, service),
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       90 * time.Second,
+	}
 	if logger != nil {
-		logger.Info("starting clerm resolver daemon", "listen", *listen, "schema", service.Document().Name, "schema_fingerprint", fmt.Sprintf("%x", service.Fingerprint()))
+		logger.Info("starting clerm resolver daemon", "listen", *listen, "schema", service.Document().Name, "schema_fingerprint", service.FingerprintText())
 	}
 	_, _ = fmt.Fprintf(streams.Stdout, "%s\n", *listen)
 	return server.ListenAndServe()

@@ -28,12 +28,12 @@ var compactJSONBufferPool = sync.Pool{
 }
 
 func BuildValues(params []schema.Parameter, payloadJSON []byte, kind string) ([]Value, error) {
-	trimmed := strings.TrimSpace(string(payloadJSON))
-	if trimmed == "" {
-		trimmed = "{}"
+	trimmed := bytes.TrimSpace(payloadJSON)
+	if len(trimmed) == 0 {
+		trimmed = []byte("{}")
 	}
 	var payload map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+	if err := json.Unmarshal(trimmed, &payload); err != nil {
 		return nil, platform.Wrap(platform.CodeParse, err, fmt.Sprintf("parse %s JSON", kind))
 	}
 	paramNames := parameterNameSet(params)

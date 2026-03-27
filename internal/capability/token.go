@@ -223,8 +223,14 @@ func ValidateUnsigned(token *Token) error {
 // AssertTimeWindow checks only the temporal claims on a token.
 // It does not verify the cryptographic signature. Call Keyring.Verify first.
 func AssertTimeWindow(token *Token, now time.Time, skew time.Duration) error {
-	if err := Validate(token); err != nil {
-		return err
+	if token == nil {
+		return platform.New(platform.CodeInvalidArgument, "capability token is required")
+	}
+	if token.NotBefore < token.IssuedAt {
+		return platform.New(platform.CodeValidation, "capability token not_before cannot be before issued_at")
+	}
+	if token.ExpiresAt <= token.NotBefore {
+		return platform.New(platform.CodeValidation, "capability token expiry must be after not_before")
 	}
 	current := now.UTC().Unix()
 	if skew < 0 {
@@ -672,6 +678,9 @@ func (d *decoder) readStringList() ([]string, error) {
 	if err != nil {
 		return nil, platform.Wrap(platform.CodeIO, err, "read capability string list count")
 	}
+	if err := d.ensureCollectionCount(int(count), 2, "capability string list"); err != nil {
+		return nil, err
+	}
 	out := make([]string, count)
 	for i := 0; i < int(count); i++ {
 		value, err := d.readString()
@@ -685,4 +694,20 @@ func (d *decoder) readStringList() ([]string, error) {
 
 func (d *decoder) remaining() int {
 	return len(d.data) - d.off
+}
+
+func (d *decoder) ensureCollectionCount(count int, minBytesPerItem int, label string) error {
+	if count < 0 {
+		return platform.New(platform.CodeValidation, label+" count is invalid")
+	}
+	if count == 0 {
+		return nil
+	}
+	if minBytesPerItem <= 0 {
+		return platform.New(platform.CodeInternal, "decoder min bytes per item is invalid")
+	}
+	if d.remaining()/minBytesPerItem < count {
+		return platform.New(platform.CodeValidation, label+" count exceeds remaining payload")
+	}
+	return nil
 }

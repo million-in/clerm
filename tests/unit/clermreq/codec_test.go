@@ -241,6 +241,14 @@ relations @general.mandene
 	}
 }
 
+func TestDecodeRejectsImpossibleArgumentCount(t *testing.T) {
+	payload := []byte{'C', 'L', 'R', 'M', 0, 2, 0, 0, 0xff, 0xff}
+
+	if _, err := clermreq.Decode(payload); err == nil || !strings.Contains(err.Error(), "request argument count exceeds remaining payload") {
+		t.Fatalf("expected argument count guard, got %v", err)
+	}
+}
+
 func TestSetCapabilityRawRejectsInvalidToken(t *testing.T) {
 	request := &clermreq.Request{Method: "@global.healthcare.search_providers.v1"}
 

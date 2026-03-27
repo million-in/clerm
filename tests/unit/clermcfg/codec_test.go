@@ -163,6 +163,23 @@ func TestDecodeLegacyVersion1Config(t *testing.T) {
 	}
 }
 
+func TestDecodeCodecRejectsImpossibleServiceCount(t *testing.T) {
+	payload := append([]byte{'C', 'L', 'R', 'C', 0, 2},
+		0, 0, // schema name
+		0, 0, // relations name
+		0, 0, // metadata description
+		0, 0, // metadata display name
+		0, 0, // metadata category
+		0, 0, // metadata tags count
+		0, 0, // route
+		0xff, 0xff, // service count
+	)
+
+	if _, err := clermcfg.DecodeCodec(payload); err == nil || !strings.Contains(err.Error(), "service count exceeds remaining payload") {
+		t.Fatalf("expected service count guard, got %v", err)
+	}
+}
+
 func mustConfigDocument(t *testing.T) *schema.Document {
 	t.Helper()
 	doc, err := schema.Parse(strings.NewReader(configSchemaSource()))

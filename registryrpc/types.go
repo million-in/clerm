@@ -30,6 +30,7 @@ type SchemaSummary struct {
 	SchemaName        string            `json:"schema_name"`
 	OwnerID           string            `json:"owner_id"`
 	Status            string            `json:"status"`
+	SchemaURL         string            `json:"schema_url,omitempty"`
 	Metadata          schema.Metadata   `json:"metadata,omitempty"`
 	Methods           []MethodSummary   `json:"methods"`
 	Relations         []RelationSummary `json:"relations"`
@@ -51,7 +52,8 @@ type RegisterInput struct {
 }
 
 type RegisterOutput struct {
-	Schema SchemaSummary `json:"schema"`
+	Schema             SchemaSummary `json:"schema"`
+	RegistrationStatus string        `json:"registration_status,omitempty"`
 }
 
 type SearchInput struct {
@@ -118,6 +120,7 @@ type RefreshTokenInput struct {
 type InvokeInput struct {
 	ProviderFingerprint string
 	Payload             []byte
+	MaxResponseBytes    int64
 }
 
 type InvokeOutput struct {

@@ -23,3 +23,23 @@ func BenchmarkValidateArrayEnvelope(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkBuildValues(b *testing.B) {
+	params := []schema.Parameter{
+		{Name: "specialty", Type: schema.ArgString},
+		{Name: "latitude", Type: schema.ArgDecimal},
+		{Name: "longitude", Type: schema.ArgDecimal},
+	}
+	raw := []byte(` { "specialty" : "cardiology" , "latitude" : 40.7 , "longitude" : -73.9 } `)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(raw)))
+	for i := 0; i < b.N; i++ {
+		values, err := clermwire.BuildValues(params, raw, "input")
+		if err != nil {
+			b.Fatalf("BuildValues() error = %v", err)
+		}
+		if len(values) != 3 {
+			b.Fatalf("unexpected value count: %d", len(values))
+		}
+	}
+}

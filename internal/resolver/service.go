@@ -70,10 +70,12 @@ type HandlerFunc func(context.Context, *Invocation) (*Result, error)
 type Service struct {
 	document           *schema.Document
 	fingerprint        [32]byte
+	fingerprintString  string
 	methods            map[string]schema.Method
 	relationConditions map[string]string
 	keyring            *capability.Keyring
 	replay             capability.ReplayStore
+	ownedReplayCloser  io.Closer
 	now                func() time.Time
 	skew               time.Duration
 	maxBodyBytes       int64
@@ -128,17 +130,21 @@ func New(doc *schema.Document) *Service {
 	for _, relation := range doc.Relations {
 		relationConditions[relation.Name] = relation.Condition
 	}
+	sum := schema.CachedPublicFingerprint(doc)
+	defaultReplayStore := capability.NewMemoryReplayStore()
 	service := &Service{
 		document:           doc,
-		fingerprint:        schema.CachedPublicFingerprint(doc),
+		fingerprint:        sum,
+		fingerprintString:  fingerprintText(sum),
 		methods:            methods,
 		relationConditions: relationConditions,
 		// Default replay protection is process-local only. Replace this with a
 		// distributed ReplayStore in multi-process production deployments.
-		replay:       capability.NewMemoryReplayStore(),
-		now:          time.Now,
-		skew:         30 * time.Second,
-		maxBodyBytes: 1 << 20,
+		replay:            defaultReplayStore,
+		ownedReplayCloser: defaultReplayStore,
+		now:               time.Now,
+		skew:              30 * time.Second,
+		maxBodyBytes:      1 << 20,
 	}
 	service.handlers.Store(map[string]HandlerFunc{})
 	return service
@@ -155,12 +161,32 @@ func (s *Service) Fingerprint() [32]byte {
 	return s.fingerprint
 }
 
+func (s *Service) FingerprintText() string {
+	if s == nil {
+		return ""
+	}
+	return s.fingerprintString
+}
+
 func (s *Service) SetCapabilityKeyring(keyring *capability.Keyring) {
 	s.keyring = keyring
 }
 
 func (s *Service) SetReplayStore(store capability.ReplayStore) {
+	if s != nil && s.ownedReplayCloser != nil {
+		_ = s.ownedReplayCloser.Close()
+		s.ownedReplayCloser = nil
+	}
 	s.replay = store
+}
+
+func (s *Service) Close() error {
+	if s == nil || s.ownedReplayCloser == nil {
+		return nil
+	}
+	closer := s.ownedReplayCloser
+	s.ownedReplayCloser = nil
+	return closer.Close()
 }
 
 func (s *Service) SetMaxBodyBytes(limit int64) {
@@ -250,7 +276,7 @@ func (s *Service) ResolveInvocationWithTarget(payload []byte, target string) (*I
 	}
 	return &Invocation{
 		Schema:            s.document.Name,
-		SchemaFingerprint: fingerprintText(s.fingerprint),
+		SchemaFingerprint: s.fingerprintString,
 		Target:            target,
 		Method:            method,
 		Relation:          method.Reference.Relation,
@@ -350,6 +376,59 @@ func (i *Invocation) ArgumentsMap() (map[string]any, error) {
 		return nil, err
 	}
 	return view.Clone(), nil
+}
+
+func (i *Invocation) MarshalArgumentsJSON() ([]byte, error) {
+	decoded, err := i.decodedArgumentMap()
+	if err != nil {
+		return nil, err
+	}
+	payload, err := json.Marshal(decoded)
+	if err != nil {
+		return nil, platform.Wrap(platform.CodeParse, err, "encode invocation arguments")
+	}
+	return payload, nil
+}
+
+func (i *Invocation) MarshalCommandJSON() ([]byte, error) {
+	if i == nil {
+		return nil, platform.New(platform.CodeInvalidArgument, "resolver invocation is required")
+	}
+	decoded, err := i.decodedArgumentMap()
+	if err != nil {
+		return nil, err
+	}
+	var capabilityView any
+	if i.Capability != nil {
+		capabilityView = i.Capability.InspectView()
+	}
+	payload, err := json.Marshal(struct {
+		Schema            string         `json:"schema"`
+		SchemaFingerprint string         `json:"schema_fingerprint"`
+		Target            string         `json:"target"`
+		Method            string         `json:"method"`
+		Relation          string         `json:"relation"`
+		Condition         string         `json:"condition"`
+		Execution         string         `json:"execution"`
+		OutputFormat      string         `json:"output_format"`
+		Arguments         map[string]any `json:"arguments"`
+		Capability        any            `json:"capability,omitempty"`
+	}{
+		Schema:            i.Schema,
+		SchemaFingerprint: i.SchemaFingerprint,
+		Target:            i.Target,
+		Method:            i.Method.Reference.Raw,
+		Relation:          i.Relation,
+		Condition:         i.Condition,
+		Execution:         i.Execution,
+		OutputFormat:      i.OutputFormat,
+		Arguments:         decoded,
+		Capability:        capabilityView,
+	})
+	if err != nil {
+		return nil, platform.Wrap(platform.CodeParse, err, "encode invocation command")
+	}
+	return payload, nil
 }
 
 func (i *Invocation) decodedArgumentMap() (map[string]any, error) {

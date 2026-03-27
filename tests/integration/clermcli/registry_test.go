@@ -207,6 +207,9 @@ relations @general.mandene
 	if !strings.Contains(stdout.String(), `"capability_out_file":`) {
 		t.Fatalf("unexpected output: %s", stdout.String())
 	}
+	if strings.Contains(stdout.String(), "cap-token") || strings.Contains(stdout.String(), "refresh-token") {
+		t.Fatalf("expected token values to be redacted from stdout when files are used: %s", stdout.String())
+	}
 }
 
 func TestRunInvokeWritesRawResponse(t *testing.T) {
@@ -240,7 +243,7 @@ func TestRunInvokeWritesRawResponse(t *testing.T) {
 				}
 				return &registryrpc.InvokeOutput{
 					StatusCode:    202,
-					Headers:       map[string][]string{"Content-Type": {"application/json"}},
+					Headers:       map[string][]string{"Content-Type": {"application/json"}, "Authorization": {"Bearer secret-token"}, "Set-Cookie": {"session=secret"}},
 					Target:        "registry.invoke",
 					CommandMethod: "@global.books.search_books.v1",
 					Body:          []byte(`{"ok":true}`),
@@ -266,6 +269,16 @@ func TestRunInvokeWritesRawResponse(t *testing.T) {
 	}
 	if output["status_code"] != float64(202) {
 		t.Fatalf("unexpected output: %#v", output)
+	}
+	headers, ok := output["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing headers in output: %#v", output)
+	}
+	if got := headers["Authorization"].([]any)[0]; got != "REDACTED" {
+		t.Fatalf("expected authorization header redaction, got %#v", headers)
+	}
+	if got := headers["Set-Cookie"].([]any)[0]; got != "REDACTED" {
+		t.Fatalf("expected set-cookie header redaction, got %#v", headers)
 	}
 }
 

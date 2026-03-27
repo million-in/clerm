@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -191,15 +190,16 @@ func (CompilerAPI) BuildRequest(doc *schema.Document, input BuildRequestInput) (
 	if doc == nil {
 		return nil, platform.New(platform.CodeInvalidArgument, "schema document is required")
 	}
-	method, ok := doc.MethodByReference(strings.TrimSpace(input.MethodReference))
+	index, err := compilerIndex(doc)
+	if err != nil {
+		return nil, err
+	}
+	method, ok := index.methods[strings.TrimSpace(input.MethodReference)]
 	if !ok {
 		return nil, platform.New(platform.CodeNotFound, "method not found in schema")
 	}
-	allowed := relationSet(input.AllowedRelations)
-	if len(allowed) > 0 {
-		if _, ok := allowed[method.Reference.Relation]; !ok {
-			return nil, platform.New(platform.CodeValidation, fmt.Sprintf("method %s is not allowed by current relations", method.Reference.Raw))
-		}
+	if !relationAllowedOrEmpty(input.AllowedRelations, method.Reference.Relation) {
+		return nil, platform.New(platform.CodeValidation, fmt.Sprintf("method %s is not allowed by current relations", method.Reference.Raw))
 	}
 	payload := input.PayloadJSON
 	if len(payload) == 0 {
@@ -209,7 +209,7 @@ func (CompilerAPI) BuildRequest(doc *schema.Document, input BuildRequestInput) (
 	if err != nil {
 		return nil, err
 	}
-	condition, ok := doc.RelationCondition(method.Reference.Relation)
+	condition, ok := index.relationConditions[method.Reference.Relation]
 	if !ok {
 		return nil, platform.New(platform.CodeValidation, "method relation is not defined in schema")
 	}
@@ -251,26 +251,17 @@ func (CompilerAPI) EncodeRequest(doc *schema.Document, input BuildRequestInput) 
 }
 
 func (CompilerAPI) Tools(doc *schema.Document, allowedRelations []string) ([]ToolDefinition, error) {
-	if doc == nil {
-		return nil, platform.New(platform.CodeInvalidArgument, "schema document is required")
+	descriptors, err := buildToolDescriptors(doc, allowedRelations)
+	if err != nil {
+		return nil, err
 	}
-	allowed := relationSet(allowedRelations)
-	methods := make([]schema.Method, 0, len(doc.Methods))
-	for _, method := range doc.Methods {
-		if len(allowed) > 0 {
-			if _, ok := allowed[method.Reference.Relation]; !ok {
-				continue
-			}
-		}
-		methods = append(methods, method)
-	}
-	sort.Slice(methods, func(i, j int) bool { return methods[i].Reference.Raw < methods[j].Reference.Raw })
-	tools := make([]ToolDefinition, 0, len(methods))
-	for _, method := range methods {
-		condition, _ := doc.RelationCondition(method.Reference.Relation)
+	tools := make([]ToolDefinition, 0, len(descriptors))
+	for _, descriptor := range descriptors {
+		method := descriptor.Method
+		condition := descriptor.Binding.Condition
 		tools = append(tools, ToolDefinition{
-			Name:          method.Reference.Method,
-			Description:   fmt.Sprintf("Build a CLERM tool-call request for %s", method.Reference.Raw),
+			Name:          descriptor.Binding.Name,
+			Description:   vendorToolDescription(descriptor.Binding),
 			Method:        method.Reference.Raw,
 			Relation:      method.Reference.Relation,
 			Condition:     condition,
@@ -521,16 +512,20 @@ func inspectableResponse(response *clermresp.Response) *InspectableResponse {
 	return result
 }
 
-func relationSet(values []string) map[string]struct{} {
-	set := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		trimmed := strings.TrimSpace(value)
-		if trimmed == "" {
-			continue
-		}
-		set[trimmed] = struct{}{}
+func relationAllowedOrEmpty(allowed []string, relation string) bool {
+	if len(allowed) == 0 {
+		return true
 	}
-	return set
+	return relationAllowed(allowed, relation)
+}
+
+func relationAllowed(allowed []string, relation string) bool {
+	for _, value := range allowed {
+		if strings.TrimSpace(value) == relation {
+			return true
+		}
+	}
+	return false
 }
 
 func replaceExt(path string, ext string) string {
@@ -562,7 +557,7 @@ func jsonSchemaType(argType schema.ArgType) map[string]any {
 	case schema.ArgUUID:
 		return map[string]any{"type": "string", "format": "uuid"}
 	case schema.ArgArray:
-		return map[string]any{"type": "array"}
+		return map[string]any{"type": "array", "items": map[string]any{}}
 	case schema.ArgTimestamp:
 		return map[string]any{"type": "string", "format": "date-time"}
 	case schema.ArgInt:

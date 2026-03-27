@@ -13,6 +13,12 @@ import (
 	"github.com/million-in/clerm/platform"
 )
 
+const (
+	defaultJSONResponseBytes   int64 = 8 << 20
+	defaultInvokeResponseBytes int64 = 8 << 20
+	maxErrorResponseBytes      int64 = 4 << 10
+)
+
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
@@ -29,6 +35,12 @@ func New(baseURL string, httpClient *http.Client) (*Client, error) {
 	}
 	if parsed.Scheme == "" || parsed.Host == "" {
 		return nil, platform.New(platform.CodeInvalidArgument, "registry base URL must include scheme and host")
+	}
+	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
+		return nil, platform.New(platform.CodeInvalidArgument, "registry base URL must use http or https")
+	}
+	if parsed.User != nil {
+		return nil, platform.New(platform.CodeInvalidArgument, "registry base URL must not include embedded credentials")
 	}
 	if httpClient == nil {
 		httpClient = defaultHTTPClient()
@@ -122,9 +134,9 @@ func (c *Client) Invoke(ctx context.Context, input InvokeInput) (*InvokeOutput, 
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := readLimitedBody(resp.Body, normalizeResponseLimit(input.MaxResponseBytes, defaultInvokeResponseBytes), "registry invoke response")
 	if err != nil {
-		return nil, platform.Wrap(platform.CodeIO, err, "read registry invoke response")
+		return nil, err
 	}
 	if resp.StatusCode >= 400 && strings.TrimSpace(resp.Header.Get("Clerm-Target")) != "registry.invoke" {
 		return nil, responseError(resp, body)
@@ -175,10 +187,10 @@ func (c *Client) doBytes(ctx context.Context, target string, contentType string,
 	if strings.TrimSpace(target) == "registry.invoke" {
 		return resp, nil
 	}
-	bodyBytes, readErr := io.ReadAll(resp.Body)
+	bodyBytes, readErr := readLimitedBody(resp.Body, maxErrorResponseBytes, "registry error response")
 	resp.Body.Close()
 	if readErr != nil {
-		return nil, platform.Wrap(platform.CodeIO, readErr, "read registry error response")
+		return nil, readErr
 	}
 	return nil, responseError(resp, bodyBytes)
 }
@@ -188,7 +200,11 @@ func decodeJSONResponse(resp *http.Response, output any) error {
 		_, err := io.Copy(io.Discard, resp.Body)
 		return err
 	}
-	if err := json.NewDecoder(resp.Body).Decode(output); err != nil {
+	body, err := readLimitedBody(resp.Body, defaultJSONResponseBytes, "registry response")
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(body, output); err != nil {
 		return platform.Wrap(platform.CodeParse, err, "decode registry response")
 	}
 	return nil
@@ -252,4 +268,25 @@ func defaultHTTPClient() *http.Client {
 		MaxIdleConns:        128,
 		MaxIdleConnsPerHost: 128,
 	})
+}
+
+func normalizeResponseLimit(limit int64, fallback int64) int64 {
+	if limit <= 0 {
+		return fallback
+	}
+	return limit
+}
+
+func readLimitedBody(body io.Reader, maxBytes int64, label string) ([]byte, error) {
+	if maxBytes <= 0 {
+		return nil, platform.New(platform.CodeInvalidArgument, label+" limit is invalid")
+	}
+	data, err := io.ReadAll(io.LimitReader(body, maxBytes+1))
+	if err != nil {
+		return nil, platform.Wrap(platform.CodeIO, err, "read "+label)
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, platform.New(platform.CodeValidation, label+" exceeds configured size limit")
+	}
+	return data, nil
 }
