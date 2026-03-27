@@ -26,6 +26,37 @@ This repository contains:
 
 The private `clerm_registry` service is a separate repository. It stores `.clermcfg`, indexes discovery metadata, manages relationships, issues invoke tokens, refreshes sessions, and routes requests using hidden schema routes.
 
+## Library API
+
+For Go code, the root module now exposes cohesive library workflows through
+`clerm.Compiler` and `clerm.Resolver`.
+
+Go export rules mean the entry points are `clerm.Compiler` and
+`clerm.Resolver` rather than lowercase `clerm.compiler` / `clerm.resolver`.
+The lower-level packages (`schema`, `clermcfg`, `clermreq`, `resolver`,
+`clermresp`, `registryrpc`, `capability`) remain available.
+
+```go
+doc, err := clerm.Compiler.LoadDocument("examples/provider_search.clermfile")
+if err != nil {
+    log.Fatal(err)
+}
+
+request, err := clerm.Compiler.EncodeRequest(doc, clerm.BuildRequestInput{
+    MethodReference: "@global.healthcare.search_providers.v1",
+    AllowedRelations: []string{"@global"},
+    PayloadJSON: []byte(`{"specialty":"cardiology","latitude":40.7,"longitude":-73.9}`),
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+service, err := clerm.Resolver.NewService(doc, clerm.ServiceOptions{})
+if err != nil {
+    log.Fatal(err)
+}
+```
+
 ## Schema Metadata
 
 A schema can define registry-visible metadata under `@metadata:`:
@@ -163,7 +194,13 @@ clerm token refresh \
 ```bash
 make vet
 go test ./... -count=1
+make test-functional
+make test-acceptance
+make test-compatibility
+make test-load
+make test-stress
 make test-race
+make bench-lib
 make bench-resolver
 make bench
 make bench-split

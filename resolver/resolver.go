@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 
 	"github.com/million-in/clerm/clermresp"
@@ -17,6 +18,7 @@ type HandlerFunc = internal.HandlerFunc
 type Service = internal.Service
 type URLPolicy = internal.URLPolicy
 type LoadConfigURLOptions = internal.LoadConfigURLOptions
+type DaemonOptions = internal.DaemonOptions
 
 var (
 	LoadConfig    = internal.LoadConfig
@@ -31,7 +33,13 @@ var (
 	Success               = internal.Success
 	SuccessResponse       = internal.SuccessResponse
 	Failure               = internal.Failure
-	BuildSuccessResponse  = func(method schema.Method, outputs map[string]any) (*clermresp.Response, error) {
+	NewDaemonHandler      = func(logger *slog.Logger, service *Service) http.Handler {
+		return internal.NewDaemonHandler(logger, service)
+	}
+	NewDaemonHandlerWithOptions = func(logger *slog.Logger, service *Service, options DaemonOptions) http.Handler {
+		return internal.NewDaemonHandlerWithOptions(logger, service, options)
+	}
+	BuildSuccessResponse = func(method schema.Method, outputs map[string]any) (*clermresp.Response, error) {
 		return clermresp.BuildSuccessMap(method, outputs)
 	}
 )

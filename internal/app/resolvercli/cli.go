@@ -15,9 +15,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/million-in/clerm"
 	"github.com/million-in/clerm/internal/capability"
 	"github.com/million-in/clerm/internal/platform"
-	"github.com/million-in/clerm/internal/resolver"
+	"github.com/million-in/clerm/resolver"
 )
 
 type Streams struct {
@@ -64,7 +65,7 @@ func RunWithIO(logger *slog.Logger, streams Streams, args []string) error {
 	service.SetMaxBodyBytes(*maxBodyBytes)
 	server := &http.Server{
 		Addr:              *listen,
-		Handler:           resolver.NewDaemonHandler(logger, service),
+		Handler:           clerm.Resolver.NewDaemonHandler(logger, service),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       90 * time.Second,
 	}
@@ -84,31 +85,27 @@ func RunWithIO(logger *slog.Logger, streams Streams, args []string) error {
 }
 
 func loadService(schemaPath string, schemaURL string, publicKeyPath string, keyID string) (*resolver.Service, error) {
-	var (
-		service *resolver.Service
-		err     error
-	)
-	switch {
-	case strings.TrimSpace(schemaPath) != "":
-		service, err = resolver.LoadConfig(strings.TrimSpace(schemaPath))
-	case strings.TrimSpace(schemaURL) != "":
-		service, err = resolver.LoadConfigURLWithOptions(context.Background(), strings.TrimSpace(schemaURL), resolver.LoadConfigURLOptions{
-			URLPolicy: resolver.DenyPrivateHostPolicy,
-		})
-	default:
-		return nil, platform.New(platform.CodeInvalidArgument, "schema source is required")
-	}
-	if err != nil {
-		return nil, err
-	}
+	options := clerm.ServiceOptions{}
 	if strings.TrimSpace(publicKeyPath) != "" {
 		publicKey, err := capability.ReadPublicKeyFile(strings.TrimSpace(publicKeyPath))
 		if err != nil {
 			return nil, err
 		}
-		service.SetCapabilityKeyring(capability.NewKeyring(map[string]ed25519.PublicKey{strings.TrimSpace(keyID): publicKey}))
+		options.CapabilityKeyring = capability.NewKeyring(map[string]ed25519.PublicKey{strings.TrimSpace(keyID): publicKey})
 	}
-	return service, nil
+	switch {
+	case strings.TrimSpace(schemaPath) != "":
+		return clerm.Resolver.LoadService(strings.TrimSpace(schemaPath), options)
+	case strings.TrimSpace(schemaURL) != "":
+		return clerm.Resolver.LoadServiceURL(context.Background(), strings.TrimSpace(schemaURL), clerm.RemoteServiceOptions{
+			Load: resolver.LoadConfigURLOptions{
+				URLPolicy: resolver.DenyPrivateHostPolicy,
+			},
+			Service: options,
+		})
+	default:
+		return nil, platform.New(platform.CodeInvalidArgument, "schema source is required")
+	}
 }
 
 func daemonListener(listen string, unixSocket string) (net.Listener, string, error) {

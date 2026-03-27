@@ -3,7 +3,7 @@ GOMODCACHE ?= $(CURDIR)/.cache/go-mod
 GO_ENV := mkdir -p $(GOCACHE) $(GOMODCACHE) && env GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE)
 GO_BENCH_ENV := mkdir -p $(GOCACHE) $(GOMODCACHE) .bench && env GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE)
 
-.PHONY: build build-resolver vet test-unit test-integration test-e2e test-race test bench bench-resolver bench-split bench-escape bench-profile clean
+.PHONY: build build-resolver vet test-unit test-integration test-functional test-acceptance test-compatibility test-load test-stress test-e2e test-race test bench bench-lib bench-resolver bench-split bench-escape bench-profile clean
 
 build:
 	mkdir -p bin
@@ -22,6 +22,21 @@ test-unit:
 test-integration:
 	$(GO_ENV) go test ./tests/integration/... -count=1
 
+test-functional:
+	$(GO_ENV) go test ./tests/functional/... -count=1
+
+test-acceptance:
+	$(GO_ENV) go test ./tests/acceptance/... -count=1
+
+test-compatibility:
+	$(GO_ENV) go test ./tests/compatibility/... -count=1
+
+test-load:
+	$(GO_ENV) go test ./tests/load/... -count=1
+
+test-stress:
+	$(GO_ENV) go test ./tests/stress/... -count=1
+
 test-e2e:
 	$(GO_ENV) go test ./tests/e2e -count=1
 
@@ -29,7 +44,10 @@ test-race:
 	$(GO_ENV) go test -race ./tests/... -count=1
 
 bench:
-	$(GO_BENCH_ENV) go test ./tests/bench/clermcfg ./tests/bench/clermreq ./tests/bench/clermwire ./tests/bench/resolver ./tests/bench/schema -bench . -benchmem -run '^$$'
+	$(GO_BENCH_ENV) go test ./tests/bench/clerm ./tests/bench/clermcfg ./tests/bench/clermreq ./tests/bench/clermwire ./tests/bench/resolver ./tests/bench/schema -bench . -benchmem -run '^$$'
+
+bench-lib:
+	$(GO_BENCH_ENV) go test ./tests/bench/clerm -bench . -benchmem -run '^$$'
 
 bench-resolver:
 	$(GO_BENCH_ENV) go test ./tests/bench/resolver -bench . -benchmem -run '^$$'

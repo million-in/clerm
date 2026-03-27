@@ -16,3 +16,6 @@ The non-Go examples all follow the same pattern:
 5. write the returned CLERM bytes back to the caller
 
 This keeps CLERM binary parsing, token verification, and response encoding in one place until each language gets a native SDK.
+
+The daemon HTTP contract used by these examples is covered by the compatibility
+tests under `tests/compatibility/clerm`.

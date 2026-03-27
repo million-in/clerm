@@ -12,6 +12,11 @@ make build-resolver
 ```bash
 make vet
 go test ./... -count=1
+make test-functional
+make test-acceptance
+make test-compatibility
+make test-load
+make test-stress
 make test-race
 make test-unit
 make test-integration
@@ -21,6 +26,7 @@ make test-e2e
 ## Run Resolver Benchmarks
 
 ```bash
+make bench-lib
 make bench-resolver
 ```
 

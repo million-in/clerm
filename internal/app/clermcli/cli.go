@@ -10,33 +10,18 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
-	"time"
 
+	"github.com/million-in/clerm"
 	"github.com/million-in/clerm/internal/capability"
-	"github.com/million-in/clerm/internal/clermcfg"
-	"github.com/million-in/clerm/internal/clermreq"
-	"github.com/million-in/clerm/internal/clermresp"
-	"github.com/million-in/clerm/internal/jsonwire"
 	"github.com/million-in/clerm/internal/platform"
-	"github.com/million-in/clerm/internal/resolver"
-	"github.com/million-in/clerm/internal/schema"
+	"github.com/million-in/clerm/resolver"
+	"github.com/million-in/clerm/schema"
 )
 
 type Streams struct {
 	Stdout io.Writer
 	Stderr io.Writer
-}
-
-type ToolDefinition struct {
-	Name          string         `json:"name"`
-	Description   string         `json:"description"`
-	Method        string         `json:"clerm_method"`
-	Relation      string         `json:"relation"`
-	Condition     string         `json:"condition"`
-	TokenRequired bool           `json:"token_required"`
-	InputSchema   map[string]any `json:"input_schema"`
 }
 
 func Run(logger *slog.Logger, args []string) error {
@@ -118,21 +103,11 @@ func runCompile(_ *slog.Logger, streams Streams, args []string) error {
 	if !strings.HasSuffix(*in, ".clermfile") {
 		return platform.New(platform.CodeInvalidArgument, "compile input must be a .clermfile")
 	}
-	doc, err := loadDocument(*in)
+	result, err := clerm.Compiler.WriteCompiledConfig(*in, *out)
 	if err != nil {
 		return err
 	}
-	data, err := clermcfg.Encode(doc)
-	if err != nil {
-		return err
-	}
-	if *out == "" {
-		*out = replaceExt(*in, ".clermcfg")
-	}
-	if err := os.WriteFile(*out, data, 0o644); err != nil {
-		return platform.Wrap(platform.CodeIO, err, "write compiled config")
-	}
-	_, _ = fmt.Fprintf(streams.Stdout, "%s\n", *out)
+	_, _ = fmt.Fprintf(streams.Stdout, "%s\n", result.OutputPath)
 	return nil
 }
 
@@ -150,7 +125,7 @@ func runInspect(streams Streams, args []string) error {
 	if *in == "" {
 		return platform.New(platform.CodeInvalidArgument, "inspect requires -in <path>")
 	}
-	result, err := inspectPath(*in, *internal)
+	result, err := clerm.Compiler.InspectPath(*in, clerm.InspectOptions{IncludeInternal: *internal})
 	if err != nil {
 		return err
 	}
@@ -226,51 +201,27 @@ func runRequest(streams Streams, args []string) error {
 	if err != nil {
 		return err
 	}
-	method, ok := doc.MethodByReference(*methodRef)
-	if !ok {
-		return platform.New(platform.CodeNotFound, "method not found in schema")
-	}
-	allowed := parseAllowedSet(*allow)
-	if len(allowed) > 0 {
-		if _, ok := allowed[method.Reference.Relation]; !ok {
-			return platform.New(platform.CodeValidation, fmt.Sprintf("method %s is not allowed by current relations", method.Reference.Raw))
-		}
-	}
 	payload, err := readPayload(*dataInline, *dataFile)
 	if err != nil {
 		return err
 	}
-	request, err := clermreq.Build(method, payload)
+	_, encodedToken, err := readCapabilityToken(*capInline, *capFile)
 	if err != nil {
 		return err
 	}
-	condition, ok := doc.RelationCondition(method.Reference.Relation)
-	if !ok {
-		return platform.New(platform.CodeValidation, "method relation is not defined in schema")
-	}
-	token, encodedToken, err := readCapabilityToken(*capInline, *capFile)
-	if err != nil {
-		return err
-	}
-	if requiresCapability(condition) && token == nil {
-		return platform.New(platform.CodeValidation, "capability token is required for this relation; obtain one from clerm_registry with `clerm token issue -registry ...`")
-	}
-	if token != nil {
-		if err := validateCapabilityScope(doc, method, condition, token); err != nil {
-			return err
-		}
-		if err := request.SetCapabilityRaw(encodedToken); err != nil {
-			return err
-		}
-	}
-	encoded, err := clermreq.Encode(request)
+	encoded, err := clerm.Compiler.EncodeRequest(doc, clerm.BuildRequestInput{
+		MethodReference:  *methodRef,
+		AllowedRelations: splitCSV(*allow),
+		PayloadJSON:      payload,
+		CapabilityRaw:    encodedToken,
+	})
 	if err != nil {
 		return err
 	}
 	if *out == "" {
-		*out = method.Reference.Method + ".clerm"
+		*out = encoded.Method.Reference.Method + ".clerm"
 	}
-	if err := os.WriteFile(*out, encoded, 0o644); err != nil {
+	if err := os.WriteFile(*out, encoded.Payload, 0o644); err != nil {
 		return platform.Wrap(platform.CodeIO, err, "write request file")
 	}
 	_, _ = fmt.Fprintf(streams.Stdout, "%s\n", *out)
@@ -299,7 +250,7 @@ func runResolve(streams Streams, args []string) error {
 	if err != nil {
 		return platform.Wrap(platform.CodeIO, err, "read request file")
 	}
-	command, err := service.ResolveBinaryWithTarget(payload, *target)
+	command, err := clerm.Resolver.ResolveBinary(service, payload, *target)
 	if err != nil {
 		return err
 	}
@@ -323,7 +274,7 @@ func runServe(logger *slog.Logger, streams Streams, args []string) error {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Addr: *listen, Handler: resolver.NewDaemonHandler(logger, service)}
+	server := &http.Server{Addr: *listen, Handler: clerm.Resolver.NewDaemonHandler(logger, service)}
 	if logger != nil {
 		logger.Info("starting clerm resolver daemon", "listen", *listen, "schema", service.Document().Name, "schema_fingerprint", fmt.Sprintf("%x", service.Fingerprint()))
 	}
@@ -346,54 +297,11 @@ func runTools(streams Streams, args []string) error {
 	if err != nil {
 		return err
 	}
-	allowed := parseAllowedSet(*allow)
-	methods := make([]schema.Method, 0, len(doc.Methods))
-	for _, method := range doc.Methods {
-		if len(allowed) > 0 {
-			if _, ok := allowed[method.Reference.Relation]; !ok {
-				continue
-			}
-		}
-		methods = append(methods, method)
-	}
-	sort.Slice(methods, func(i, j int) bool { return methods[i].Reference.Raw < methods[j].Reference.Raw })
-	tools := make([]ToolDefinition, 0, len(methods))
-	for _, method := range methods {
-		condition, _ := doc.RelationCondition(method.Reference.Relation)
-		tools = append(tools, ToolDefinition{
-			Name:          method.Reference.Method,
-			Description:   fmt.Sprintf("Build a CLERM tool-call request for %s", method.Reference.Raw),
-			Method:        method.Reference.Raw,
-			Relation:      method.Reference.Relation,
-			Condition:     condition,
-			TokenRequired: requiresCapability(condition),
-			InputSchema:   inputJSONSchema(method.InputArgs),
-		})
+	tools, err := clerm.Compiler.Tools(doc, splitCSV(*allow))
+	if err != nil {
+		return err
 	}
 	return writeJSON(streams.Stdout, tools)
-}
-
-type benchmarkSize struct {
-	CLERMBytes   int     `json:"clerm_bytes"`
-	JSONBytes    int     `json:"json_bytes"`
-	SavedBytes   int     `json:"saved_bytes"`
-	SavedPercent float64 `json:"saved_percent"`
-}
-
-type benchmarkTiming struct {
-	CLERMEncodeNS float64 `json:"clerm_encode_ns_per_op"`
-	CLERMDecodeNS float64 `json:"clerm_decode_ns_per_op"`
-	JSONEncodeNS  float64 `json:"json_encode_ns_per_op"`
-	JSONDecodeNS  float64 `json:"json_decode_ns_per_op"`
-}
-
-type benchmarkReport struct {
-	Iterations      int             `json:"iterations"`
-	MethodologyNote string          `json:"methodology_note"`
-	ConfigSize      benchmarkSize   `json:"config_size"`
-	RequestSize     benchmarkSize   `json:"request_size"`
-	ConfigTime      benchmarkTiming `json:"config_time"`
-	RequestTime     benchmarkTiming `json:"request_time"`
 }
 
 func runBenchmark(streams Streams, args []string) error {
@@ -414,51 +322,17 @@ func runBenchmark(streams Streams, args []string) error {
 	if err != nil {
 		return err
 	}
-	method, ok := doc.MethodByReference(*methodRef)
-	if !ok {
-		return platform.New(platform.CodeNotFound, "method not found in schema")
-	}
 	payload, err := readPayload(*dataInline, *dataFile)
 	if err != nil {
 		return err
 	}
-	request, err := clermreq.Build(method, payload)
-	if err != nil {
-		return err
-	}
-	cfgBytes, err := clermcfg.Encode(doc)
-	if err != nil {
-		return err
-	}
-	reqBytes, err := clermreq.Encode(request)
-	if err != nil {
-		return err
-	}
-	cfgJSON, err := jsonwire.MarshalConfig(doc, true)
-	if err != nil {
-		return err
-	}
-	reqJSON, err := jsonwire.MarshalRequest(request)
-	if err != nil {
-		return err
-	}
-	report := benchmarkReport{
+	report, err := clerm.Compiler.Benchmark(doc, clerm.BenchmarkInput{
+		MethodReference: *methodRef,
+		PayloadJSON:     payload,
 		Iterations:      *iterations,
-		MethodologyNote: "These CLI loop timings include per-iteration function-call and error-check overhead. Use `go test -bench` for precise microbenchmarks.",
-		ConfigSize:      sizeComparison(len(cfgBytes), len(cfgJSON)),
-		RequestSize:     sizeComparison(len(reqBytes), len(reqJSON)),
-		ConfigTime: benchmarkTiming{
-			CLERMEncodeNS: measureNS(*iterations, func() error { _, err := clermcfg.Encode(doc); return err }),
-			CLERMDecodeNS: measureNS(*iterations, func() error { _, err := clermcfg.Decode(cfgBytes); return err }),
-			JSONEncodeNS:  measureNS(*iterations, func() error { _, err := jsonwire.MarshalConfig(doc, true); return err }),
-			JSONDecodeNS:  measureNS(*iterations, func() error { _, err := jsonwire.UnmarshalConfig(cfgJSON); return err }),
-		},
-		RequestTime: benchmarkTiming{
-			CLERMEncodeNS: measureNS(*iterations, func() error { _, err := clermreq.Encode(request); return err }),
-			CLERMDecodeNS: measureNS(*iterations, func() error { _, err := clermreq.Decode(reqBytes); return err }),
-			JSONEncodeNS:  measureNS(*iterations, func() error { _, err := jsonwire.MarshalRequest(request); return err }),
-			JSONDecodeNS:  measureNS(*iterations, func() error { _, err := jsonwire.UnmarshalRequest(reqJSON); return err }),
-		},
+	})
+	if err != nil {
+		return err
 	}
 	return writeJSON(streams.Stdout, report)
 }
@@ -520,163 +394,21 @@ func printUsage(w io.Writer) {
 }
 
 func loadDocument(path string) (*schema.Document, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, platform.Wrap(platform.CodeIO, err, "read schema input")
-	}
-	switch {
-	case strings.HasSuffix(path, ".clermfile"):
-		return schema.Parse(strings.NewReader(string(data)))
-	case clermcfg.IsEncoded(data):
-		return clermcfg.Decode(data)
-	default:
-		return nil, platform.New(platform.CodeValidation, "unsupported schema input; expected .clermfile or .clermcfg")
-	}
+	return clerm.Compiler.LoadDocument(path)
 }
 
 func loadService(path string, publicKeyPath string, keyID string) (*resolver.Service, error) {
-	doc, err := loadDocument(path)
-	if err != nil {
-		return nil, err
-	}
-	service := resolver.New(doc)
+	options := clerm.ServiceOptions{}
 	if strings.TrimSpace(publicKeyPath) != "" {
 		publicKey, err := capability.ReadPublicKeyFile(publicKeyPath)
 		if err != nil {
 			return nil, err
 		}
-		service.SetCapabilityKeyring(capability.NewKeyring(map[string]ed25519.PublicKey{
+		options.CapabilityKeyring = capability.NewKeyring(map[string]ed25519.PublicKey{
 			strings.TrimSpace(keyID): publicKey,
-		}))
+		})
 	}
-	return service, nil
-}
-
-func inspectPath(path string, internal bool) (any, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, platform.Wrap(platform.CodeIO, err, "read inspect input")
-	}
-	if strings.HasSuffix(path, ".clermfile") {
-		doc, err := schema.Parse(strings.NewReader(string(data)))
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"kind": "clermfile", "document": inspectableDocument(doc, internal)}, nil
-	}
-	if clermcfg.IsEncoded(data) {
-		doc, err := clermcfg.Decode(data)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"kind": "clermcfg", "document": inspectableDocument(doc, internal)}, nil
-	}
-	if clermreq.IsEncoded(data) {
-		request, err := clermreq.Decode(data)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"kind": "clerm", "request": inspectableRequest(request)}, nil
-	}
-	if clermresp.IsEncoded(data) {
-		response, err := clermresp.Decode(data)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"kind": "clerm_response", "response": inspectableResponse(response)}, nil
-	}
-	return nil, platform.New(platform.CodeValidation, "unsupported inspect input")
-}
-
-func inspectableDocument(doc *schema.Document, internal bool) any {
-	if !internal {
-		return buildInspectableDocumentPublic(doc)
-	}
-	return inspectableDocumentInternal{
-		Name:          doc.Name,
-		RelationsName: doc.RelationsName,
-		Metadata:      doc.Metadata,
-		Route:         doc.Route,
-		Services:      doc.Services,
-		Methods:       doc.Methods,
-		Relations:     doc.Relations,
-	}
-}
-
-type inspectableDocumentPublic struct {
-	Name          string                `json:"name"`
-	RelationsName string                `json:"relations_name"`
-	Metadata      schema.Metadata       `json:"metadata,omitempty"`
-	Services      []schema.ServiceRef   `json:"services"`
-	Methods       []schema.Method       `json:"methods"`
-	Relations     []schema.RelationRule `json:"relations"`
-}
-
-type inspectableDocumentInternal struct {
-	Name          string                `json:"name"`
-	RelationsName string                `json:"relations_name"`
-	Metadata      schema.Metadata       `json:"metadata,omitempty"`
-	Route         string                `json:"route"`
-	Services      []schema.ServiceRef   `json:"services"`
-	Methods       []schema.Method       `json:"methods"`
-	Relations     []schema.RelationRule `json:"relations"`
-}
-
-func buildInspectableDocumentPublic(doc *schema.Document) inspectableDocumentPublic {
-	if doc == nil {
-		return inspectableDocumentPublic{}
-	}
-	return inspectableDocumentPublic{
-		Name:          doc.Name,
-		RelationsName: doc.RelationsName,
-		Metadata:      doc.Metadata,
-		Services:      doc.Services,
-		Methods:       doc.Methods,
-		Relations:     doc.Relations,
-	}
-}
-
-func inspectableRequest(request *clermreq.Request) any {
-	result := map[string]any{
-		"method":    request.Method,
-		"arguments": request.Arguments,
-	}
-	if len(request.CapabilityRaw) > 0 {
-		token, err := capability.Decode(request.CapabilityRaw)
-		if err == nil {
-			result["capability"] = token.InspectView()
-		} else {
-			result["capability_error"] = err.Error()
-		}
-	}
-	return result
-}
-
-func inspectableResponse(response *clermresp.Response) any {
-	result := map[string]any{
-		"method": response.Method,
-	}
-	if response.Error.Code != "" || response.Error.Message != "" {
-		result["error"] = response.Error
-		return result
-	}
-	result["outputs"] = response.Outputs
-	if values, err := response.AsMap(); err == nil {
-		result["decoded_outputs"] = values
-	}
-	return result
-}
-
-func parseAllowedSet(raw string) map[string]struct{} {
-	allowed := map[string]struct{}{}
-	for _, part := range strings.Split(raw, ",") {
-		value := strings.TrimSpace(part)
-		if value == "" {
-			continue
-		}
-		allowed[value] = struct{}{}
-	}
-	return allowed
+	return clerm.Resolver.LoadService(path, options)
 }
 
 func splitCSV(raw string) []string {
@@ -734,96 +466,8 @@ func readCapabilityToken(inline string, path string) (*capability.Token, []byte,
 	return token, encoded, nil
 }
 
-func validateCapabilityScope(doc *schema.Document, method schema.Method, condition string, token *capability.Token) error {
-	if token.Schema != doc.Name {
-		return platform.New(platform.CodeValidation, "capability token schema does not match request schema")
-	}
-	if token.SchemaHash != schema.CachedPublicFingerprint(doc) {
-		return platform.New(platform.CodeValidation, "capability token schema fingerprint does not match request schema")
-	}
-	if token.Condition != condition {
-		return platform.New(platform.CodeValidation, "capability token condition does not match method relation")
-	}
-	if !token.AllowsMethod(method.Reference.Raw, method.Reference.Relation) {
-		return platform.New(platform.CodeValidation, "capability token does not allow this method")
-	}
-	return nil
-}
-
-func requiresCapability(condition string) bool {
-	return strings.TrimSpace(strings.ToLower(condition)) != "any.protected"
-}
-
 func writeJSON(w io.Writer, value any) error {
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(value)
-}
-
-func replaceExt(path string, ext string) string {
-	base := strings.TrimSuffix(path, filepath.Ext(path))
-	return base + ext
-}
-
-func inputJSONSchema(params []schema.Parameter) map[string]any {
-	properties := map[string]any{}
-	required := make([]string, 0, len(params))
-	for _, param := range params {
-		properties[param.Name] = jsonSchemaType(param.Type)
-		required = append(required, param.Name)
-	}
-	return map[string]any{
-		"type":                 "object",
-		"properties":           properties,
-		"required":             required,
-		"additionalProperties": false,
-	}
-}
-
-func jsonSchemaType(argType schema.ArgType) map[string]any {
-	switch argType {
-	case schema.ArgString:
-		return map[string]any{"type": "string"}
-	case schema.ArgDecimal:
-		return map[string]any{"type": "number"}
-	case schema.ArgUUID:
-		return map[string]any{"type": "string", "format": "uuid"}
-	case schema.ArgArray:
-		return map[string]any{"type": "array"}
-	case schema.ArgTimestamp:
-		return map[string]any{"type": "string", "format": "date-time"}
-	case schema.ArgInt:
-		return map[string]any{"type": "integer"}
-	case schema.ArgBool:
-		return map[string]any{"type": "boolean"}
-	default:
-		return map[string]any{"type": "string"}
-	}
-}
-
-func sizeComparison(clermBytes int, jsonBytes int) benchmarkSize {
-	saved := jsonBytes - clermBytes
-	savedPercent := 0.0
-	if jsonBytes > 0 {
-		savedPercent = (float64(saved) / float64(jsonBytes)) * 100
-	}
-	return benchmarkSize{
-		CLERMBytes:   clermBytes,
-		JSONBytes:    jsonBytes,
-		SavedBytes:   saved,
-		SavedPercent: savedPercent,
-	}
-}
-
-func measureNS(iterations int, fn func() error) float64 {
-	if iterations <= 0 {
-		iterations = 1
-	}
-	start := time.Now()
-	for i := 0; i < iterations; i++ {
-		if err := fn(); err != nil {
-			return -1
-		}
-	}
-	return float64(time.Since(start).Nanoseconds()) / float64(iterations)
 }
